@@ -1,6 +1,6 @@
 # ROOTKey Connectors
 
-[![CI](https://github.com/rootkey-ai/rootkey-connectors/actions/workflows/ci.yml/badge.svg)](https://github.com/rootkey-ai/rootkey-connectors/actions/workflows/ci.yml)
+[![CI](https://github.com/ROOT-Key/rootkey-connectors/actions/workflows/ci.yml/badge.svg)](https://github.com/ROOT-Key/rootkey-connectors/actions/workflows/ci.yml)
 
 Official deployment modules for integrating external storage and messaging services with the [ROOTKey](https://rootkey.ai) cyber resilience platform.
 
