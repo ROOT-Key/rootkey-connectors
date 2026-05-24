@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    branches: [main, development]
+  pull_request:
+
+jobs:
+  lambda:
+    name: "aws-s3 lambda — typecheck / test / build"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    defaults:
+      run:
+        working-directory: aws-s3/lambda
+
+    steps:
+      - uses: actions/checkout@v4
+        # TODO: pin to SHA — replace @v4 with @<sha> once the repo is on GitHub
+        # Find the SHA at: https://github.com/actions/checkout/releases
+
+      - uses: actions/setup-node@v4
+        # TODO: pin to SHA — https://github.com/actions/setup-node/releases
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=moderate
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Coverage summary
+        run: |
+          node -e "
+            const s = require('./coverage/coverage-summary.json');
+            const pct = v => v.pct + '%';
+            const rows = Object.entries(s).map(([file, d]) => {
+              const name = file === 'total' ? '**Total**' : file.split('/').pop();
+              return \`| \${name} | \${pct(d.statements)} | \${pct(d.branches)} | \${pct(d.functions)} | \${pct(d.lines)} |\`;
+            });
+            const table = [
+              '## Coverage',
+              '',
+              '| File | Statements | Branches | Functions | Lines |',
+              '|---|---|---|---|---|',
+              ...rows,
+            ].join('\n');
+            require('fs').appendFileSync(process.env.GITHUB_STEP_SUMMARY, table);
+          "
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        # TODO: pin to SHA — https://github.com/actions/upload-artifact/releases
+        with:
+          name: coverage-report
+          path: aws-s3/lambda/coverage/
+          retention-days: 30
+
+      - name: Build
+        run: npm run build
