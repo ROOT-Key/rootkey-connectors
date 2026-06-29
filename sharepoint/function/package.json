@@ -4,7 +4,7 @@
   "private": true,
   "main": "dist/src/index.js",
   "scripts": {
-    "build": "esbuild src/index.ts --bundle --platform=node --target=node22 --outfile=dist/src/index.js --external:@azure/functions-core && cp host.json dist/host.json && cp package.json dist/package.json",
+    "build": "esbuild src/index.ts --bundle --platform=node --target=node22 --outfile=dist/src/index.js --external:@azure/functions-core && node -e \"const fs=require('fs');fs.copyFileSync('host.json','dist/host.json');const p=require('./package.json');p.main='src/index.js';fs.writeFileSync('dist/package.json',JSON.stringify(p,null,2))\"",
     "test": "jest",
     "typecheck": "tsc --noEmit"
   },
