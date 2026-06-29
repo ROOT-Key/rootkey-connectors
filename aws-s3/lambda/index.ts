@@ -112,7 +112,7 @@ async function processObject(
   const footerPart = Buffer.from(`\r\n--${boundary}--\r\n`);
   const contentLength = headerPart.length + resolvedSize + footerPart.length;
 
-  const url = new URL(`${ROOTKEY_API_URL}/api-v1/files/`);
+  const url = new URL(`${ROOTKEY_API_URL}/api-v1/connectors/files/`);
   const { status, responseBody } = await streamUpload({
     url,
     apiKey,

@@ -40,7 +40,7 @@ export function uploadFileToRootkey(
   const footerPart = Buffer.from(`\r\n--${boundary}--\r\n`);
   const totalLength = headerPart.length + contentLength + footerPart.length;
 
-  const url = new URL(`${config.apiUrl}/api-v1/files/`);
+  const url = new URL(`${config.apiUrl}/api-v1/connectors/files/`);
 
   return new Promise<UploadResult>((resolve, reject) => {
     const req = https.request(

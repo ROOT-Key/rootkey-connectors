@@ -82,7 +82,7 @@ describe("uploadFileToRootkey", () => {
     expect(result.status).toBe(201);
     expect(result.responseBody).toBe('{"id":"abc"}');
 
-    expect(captured.url).toBe("https://api.test.rootkey.ai/api-v1/files/");
+    expect(captured.url).toBe("https://api.test.rootkey.ai/api-v1/connectors/files/");
     const headers = captured.init.headers as Record<string, string>;
     expect(headers["x-api-key"]).toBe("rk-key");
     expect(headers["Content-Type"]).toMatch(/^multipart\/form-data; boundary=----ROOTKey/);

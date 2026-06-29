@@ -21,7 +21,7 @@ Connectors that operate exclusively within ROOTKey's backend (SharePoint, OneDri
 3. From that point on, the module automatically detects new files and uploads them to the ROOTKey API:
 
 ```
-POST {ROOTKEY_API_URL}/api-v1/files/
+POST {ROOTKEY_API_URL}/api-v1/connectors/files/
 x-api-key: {ROOTKEY_API_KEY}
 Content-Type: multipart/form-data
 ```

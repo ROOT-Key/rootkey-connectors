@@ -76,7 +76,7 @@ export async function uploadFileToRootkey(
   };
   if (eTag) headers["x-rootkey-source-etag"] = eTag;
 
-  const url = `${config.apiUrl}/api-v1/files/`;
+  const url = `${config.apiUrl}/api-v1/connectors/files/`;
   const init: RequestInit & { duplex?: "half" } = {
     method: "POST",
     headers,
