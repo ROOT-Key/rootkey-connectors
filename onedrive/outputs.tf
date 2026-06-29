@@ -1,16 +1,16 @@
 output "function_app_name" {
   description = "Name of the deployed Azure Function App."
-  value       = azurerm_linux_function_app.func.name
+  value       = azurerm_function_app_flex_consumption.func.name
 }
 
 output "function_app_hostname" {
   description = "Default hostname of the Function App (used as the Microsoft Graph webhook target)."
-  value       = azurerm_linux_function_app.func.default_hostname
+  value       = azurerm_function_app_flex_consumption.func.default_hostname
 }
 
 output "notification_url" {
   description = "Microsoft Graph webhook notification URL. Used by the Function App itself to register the subscription; surfaced for diagnostics."
-  value       = "https://${azurerm_linux_function_app.func.default_hostname}/api/notification"
+  value       = "https://${azurerm_function_app_flex_consumption.func.default_hostname}/api/notification"
 }
 
 output "key_vault_name" {
