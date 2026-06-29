@@ -21,6 +21,10 @@ terraform {
 }
 
 provider "azurerm" {
+  # storage_use_azuread = true lets the provider use AAD-based auth for storage
+  # data-plane operations (e.g. uploading the deployment blob). Required because
+  # we disable shared access keys on the storage account.
+  storage_use_azuread = true
   features {
     key_vault {
       purge_soft_delete_on_destroy    = false
@@ -54,6 +58,8 @@ locals {
   service_plan_name  = "rksp-plan-${var.name_suffix}-${local.site_hash}"
   identity_name      = "rksp-id-${var.name_suffix}-${local.site_hash}"
 
+  deployment_package_endpoint = "${azurerm_storage_account.func.primary_blob_endpoint}deploymentpackage"
+
   common_tags = merge(
     {
       "rootkey:managed-by" = "terraform"
@@ -67,12 +73,9 @@ locals {
 # ─── Function build ────────────────────────────────────────────────────────────
 
 resource "null_resource" "function_build" {
-  # Always rebuild on every apply. Source-hash triggers were too narrow: after
-  # `terraform get -update` (which re-clones the module from git and wipes the
-  # local dist/ folder), the source files are unchanged so the hashes match
-  # state — but the dist/ folder is gone, and `data "archive_file"` fails with
-  # "could not archive missing directory". `npm ci && npm run build` is fast
-  # (~10s on a warm cache), so the cost of always running is negligible.
+  # Always rebuild on every apply so the deployment artifact is fresh. The build
+  # itself is fast (~10s with a warm npm cache) and ensures the bundle exists
+  # even after `terraform get -update` re-clones the module and wipes dist/.
   triggers = {
     always_run = timestamp()
   }
@@ -100,25 +103,13 @@ resource "azurerm_user_assigned_identity" "func" {
   tags                = local.common_tags
 }
 
-# ─── Storage Account (function backing + delta state + DLQ) ────────────────────
+# ─── Storage Account ───────────────────────────────────────────────────────────
 #
-# SECURITY NOTE — shared_access_key_enabled = true
-#
-# Storage account access keys are enabled because the Azure Functions Consumption
-# runtime requires the legacy AzureWebJobsStorage connection string to bootstrap.
-# This is the same model used by the majority of Azure Functions deployments.
-#
-# Mitigations in this module:
-#  - The Function App's user-assigned managed identity uses RBAC (not the keys)
-#    for the connector's own state operations (delta blobs, DLQ queue).
-#  - allow_nested_items_to_be_public = false prevents public blob exposure.
-#  - min_tls_version = TLS1_2 enforces modern transport security.
-#  - public_network_access_enabled defaults to true; tighten via firewall/VNet
-#    if your tenancy requires it (Consumption plan limits VNet integration).
-#
-# Roadmap: migrate to identity-based AzureWebJobsStorage connections once the
-# customer is on a plan that supports it (Premium / Flex Consumption / App Service).
-# Track: https://learn.microsoft.com/azure/azure-functions/functions-reference#configure-an-identity-based-connection
+# Shared access keys are DISABLED. The Function App reaches storage exclusively
+# through its user-assigned managed identity (Storage Blob Data Owner +
+# Storage Queue Data Contributor). This is supported on Flex Consumption — the
+# previous Linux Consumption (Y1) SKU required the legacy connection string and
+# could not turn off shared keys, which is one of the reasons for moving to FC1.
 
 resource "azurerm_storage_account" "func" {
   name                            = local.storage_name
@@ -128,12 +119,22 @@ resource "azurerm_storage_account" "func" {
   account_replication_type        = "LRS"
   min_tls_version                 = "TLS1_2"
   allow_nested_items_to_be_public = false
-  shared_access_key_enabled       = true
+  shared_access_key_enabled       = false
   tags                            = local.common_tags
 }
 
+# Container for the connector's own state (delta cursors, subscriptions registry,
+# sync lock blobs). Used by the Worker code via the managed identity.
 resource "azurerm_storage_container" "state" {
   name                  = "connector-state"
+  storage_account_id    = azurerm_storage_account.func.id
+  container_access_type = "private"
+}
+
+# Container that Flex Consumption pulls the deployment zip from. The Function
+# App is configured to watch this container and reload when a new blob lands.
+resource "azurerm_storage_container" "deployment" {
+  name                  = "deploymentpackage"
   storage_account_id    = azurerm_storage_account.func.id
   container_access_type = "private"
 }
@@ -141,6 +142,23 @@ resource "azurerm_storage_container" "state" {
 resource "azurerm_storage_queue" "dlq" {
   name               = "rootkey-dlq"
   storage_account_id = azurerm_storage_account.func.id
+}
+
+# Upload the freshly-built function bundle to the deployment container. The blob
+# name is content-hashed so that Flex Consumption sees a "new" deployment when
+# the bundle changes and reloads the worker; if the bundle is unchanged the blob
+# name is the same and Terraform / Flex are both no-ops.
+resource "azurerm_storage_blob" "deployment_package" {
+  name                   = "function-${data.archive_file.function_zip.output_base64sha256}.zip"
+  storage_account_name   = azurerm_storage_account.func.name
+  storage_container_name = azurerm_storage_container.deployment.name
+  type                   = "Block"
+  source                 = data.archive_file.function_zip.output_path
+  content_md5            = data.archive_file.function_zip.output_md5
+
+  depends_on = [
+    azurerm_role_assignment.storage_blob_terraform,
+  ]
 }
 
 # ─── Key Vault (Graph client secret + ROOTKey API key + webhook secret) ────────
@@ -188,8 +206,21 @@ resource "azurerm_key_vault_secret" "webhook_client_state" {
   depends_on = [azurerm_role_assignment.kv_admin_terraform]
 }
 
-# ─── Role assignments for the Function App's identity ──────────────────────────
+# ─── Role assignments ──────────────────────────────────────────────────────────
 
+# Terraform principal needs to write blobs (upload the deployment package).
+resource "azurerm_role_assignment" "storage_blob_terraform" {
+  scope                = azurerm_storage_account.func.id
+  role_definition_name = "Storage Blob Data Contributor"
+  principal_id         = data.azurerm_client_config.current.object_id
+}
+
+# Function App identity needs to:
+#  - Read the deployment package (Flex Consumption pulls the zip from blob storage)
+#  - Read/write its own state blobs and DLQ queue
+#  - Read Key Vault secrets
+# Storage Blob Data Owner gives both deployment-package and state-blob access in
+# one role; matches the Microsoft Flex Consumption reference sample.
 resource "azurerm_role_assignment" "kv_reader_func" {
   scope                = azurerm_key_vault.kv.id
   role_definition_name = "Key Vault Secrets User"
@@ -198,7 +229,7 @@ resource "azurerm_role_assignment" "kv_reader_func" {
 
 resource "azurerm_role_assignment" "storage_blob_func" {
   scope                = azurerm_storage_account.func.id
-  role_definition_name = "Storage Blob Data Contributor"
+  role_definition_name = "Storage Blob Data Owner"
   principal_id         = azurerm_user_assigned_identity.func.principal_id
 }
 
@@ -229,25 +260,46 @@ resource "azurerm_application_insights" "ai" {
   tags                = local.common_tags
 }
 
-# ─── Service plan + Function App ───────────────────────────────────────────────
+# ─── Service plan + Function App (Flex Consumption) ───────────────────────────
 
 resource "azurerm_service_plan" "plan" {
   name                = local.service_plan_name
   location            = data.azurerm_resource_group.rg.location
   resource_group_name = data.azurerm_resource_group.rg.name
   os_type             = "Linux"
-  sku_name            = "Y1" # Consumption
+  sku_name            = "FC1" # Flex Consumption (Linux Consumption Y1 is Retiring)
   tags                = local.common_tags
 }
 
-resource "azurerm_linux_function_app" "func" {
+resource "azurerm_function_app_flex_consumption" "func" {
   name                = local.function_name
   location            = data.azurerm_resource_group.rg.location
   resource_group_name = data.azurerm_resource_group.rg.name
   service_plan_id     = azurerm_service_plan.plan.id
 
-  storage_account_name       = azurerm_storage_account.func.name
-  storage_account_access_key = azurerm_storage_account.func.primary_access_key
+  # Deployment package source: Flex Consumption pulls the zip directly from a
+  # blob container, watching for new blobs. We upload the zip via
+  # azurerm_storage_blob.deployment_package above.
+  storage_container_type      = "blobContainer"
+  storage_container_endpoint  = local.deployment_package_endpoint
+  storage_authentication_type = "UserAssignedIdentity"
+  storage_user_assigned_identity_id = azurerm_user_assigned_identity.func.id
+
+  # Node.js v4 programming model is first-class on Flex — no EnableWorkerIndexing
+  # flag needed, no function.json files. The Worker registers functions in code
+  # via app.http()/app.timer()/app.storageQueue().
+  runtime_name    = "node"
+  runtime_version = "22"
+
+  # 512 MB is sufficient for our streaming workload (file pipes through, never
+  # buffers the whole content in memory). Larger sizes increase GB-s cost
+  # proportionally for negligible benefit on this workload.
+  instance_memory_in_mb = 512
+
+  # Cap concurrent scale-out. A single drive's webhook fan-out rarely exceeds
+  # a handful of concurrent invocations; the per-drive sync lease serializes
+  # within a drive regardless.
+  maximum_instance_count = 40
 
   https_only = true
 
@@ -256,42 +308,21 @@ resource "azurerm_linux_function_app" "func" {
     identity_ids = [azurerm_user_assigned_identity.func.id]
   }
 
-  key_vault_reference_identity_id = azurerm_user_assigned_identity.func.id
+  # With a single UAMI attached, the Functions runtime uses it automatically
+  # for resolving @Microsoft.KeyVault(...) references in app_settings — there
+  # is no key_vault_reference_identity_id attribute on this resource type.
 
   site_config {
     application_insights_connection_string = azurerm_application_insights.ai.connection_string
-    application_insights_key               = azurerm_application_insights.ai.instrumentation_key
-    ftps_state                             = "Disabled"
-    minimum_tls_version                    = "1.2"
-    http2_enabled                          = true
-
-    # No `cors {}` block: the Azure Function App default is no CORS configuration
-    # at all, which means browsers receive no Access-Control-Allow-Origin headers
-    # and cross-origin requests are blocked. The webhook is called by Microsoft
-    # Graph server-to-server, so this is the correct posture. An explicit empty
-    # allowed_origins list is rejected by the azurerm provider (min 1 item).
-
-    application_stack {
-      node_version = "22"
-    }
   }
 
   app_settings = {
-    FUNCTIONS_WORKER_RUNTIME       = "node"
-    WEBSITE_NODE_DEFAULT_VERSION   = "~22"
-    WEBSITE_RUN_FROM_PACKAGE       = "1"
-    SCM_DO_BUILD_DURING_DEPLOYMENT = "false"
-
-    # Required by the Azure Functions Node.js v4 programming model: we register
-    # functions programmatically (app.http/app.timer/app.storageQueue) instead
-    # of providing function.json files. Without this flag, the host falls back
-    # to the v3 discovery path and finds zero functions.
-    AzureWebJobsFeatureFlags = "EnableWorkerIndexing"
-
-    # Fail the worker boot loudly if our bundle throws on import — otherwise
-    # startup errors get silently swallowed and the host runs with no
-    # registered functions.
-    FUNCTIONS_NODE_BLOCK_ON_ENTRY_POINT_ERROR = "true"
+    # Identity-based connection to AzureWebJobsStorage. The empty
+    # AzureWebJobsStorage value is a workaround for an azurerm provider quirk —
+    # it must be present (even empty) alongside the __accountName attribute.
+    # See https://github.com/hashicorp/terraform-provider-azurerm/pull/29099
+    AzureWebJobsStorage             = ""
+    AzureWebJobsStorage__accountName = azurerm_storage_account.func.name
 
     ROOTKEY_API_URL     = var.rootkey_api_url
     MAX_FILE_SIZE_BYTES = tostring(var.max_file_size_bytes)
@@ -310,13 +341,13 @@ resource "azurerm_linux_function_app" "func" {
     WEBHOOK_CLIENT_STATE = "@Microsoft.KeyVault(SecretUri=${azurerm_key_vault_secret.webhook_client_state.versionless_id})"
   }
 
-  zip_deploy_file = data.archive_file.function_zip.output_path
-  tags            = local.common_tags
+  tags = local.common_tags
 
   depends_on = [
     azurerm_role_assignment.kv_reader_func,
     azurerm_role_assignment.storage_blob_func,
     azurerm_role_assignment.storage_queue_func,
+    azurerm_storage_blob.deployment_package,
     azurerm_key_vault_secret.graph_client_secret,
     azurerm_key_vault_secret.rootkey_api_key,
     azurerm_key_vault_secret.webhook_client_state,

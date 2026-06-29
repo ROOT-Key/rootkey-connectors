@@ -1,6 +1,6 @@
 # OneDrive Connector
 
-Deploys a serverless integration into your Azure subscription. An Azure Function App (TypeScript, Node.js 22, Consumption plan) receives Microsoft Graph change notifications for a OneDrive drive, runs a delta query to identify new/updated files, and streams each file to the ROOTKey API using your Connector API Key.
+Deploys a serverless integration into your Azure subscription. An Azure Function App (TypeScript, Node.js 22, **Flex Consumption** plan) receives Microsoft Graph change notifications for a OneDrive drive, runs a delta query to identify new/updated files, and streams each file to the ROOTKey API using your Connector API Key.
 
 **Why the full file is uploaded:** ROOTKey's cyber resilience guarantee covers recovery — not just detection. Anchoring a hash alone cannot restore a corrupted or encrypted file. The full file content is required so ROOTKey can return the verified original on demand.
 
@@ -8,8 +8,9 @@ Deploys a serverless integration into your Azure subscription. An Azure Function
 
 | Resource | Purpose |
 |---|---|
-| `azurerm_linux_function_app` | The connector itself (Node.js 22, Consumption plan, HTTPS only, TLS 1.2 min, CORS closed). |
-| `azurerm_service_plan` (Y1) | Consumption plan; you pay only per execution. |
+| `azurerm_function_app_flex_consumption` | The connector itself (Node.js 22, Flex Consumption plan, HTTPS-only, 512 MB instances by default). |
+| `azurerm_service_plan` (FC1) | Flex Consumption plan; pay per execution + GB-second. Replaces Linux Consumption (Y1), which is in the **Retiring** state in several regions. |
+| `azurerm_storage_container` (`deploymentpackage`) | Holds the Function App's deployment zip. Flex Consumption pulls the bundle from here at boot. |
 | `azurerm_storage_account` | Function backing + delta cursor state + DLQ. |
 | `azurerm_storage_container` (`connector-state`) | Holds `delta-link.txt`, `subscription.json`, and `delta-sync.lock`. |
 | `azurerm_storage_queue` (`rootkey-dlq`) | Dead-letter queue for per-file failures after retries. |
@@ -48,7 +49,7 @@ This connector is designed to fit a defensive posture out of the box; some choic
 - **Key Vault purge protection** is **enabled by default** (`enable_key_vault_purge_protection = true`). This prevents accidental permanent deletion of the connector secrets. Once enabled it CANNOT be disabled, and a destroyed Key Vault cannot be fully purged until the 7-day soft-delete window elapses. Set the variable to `false` only during short pilots.
 - **CORS closed.** The webhook endpoint is called server-to-server by Microsoft Graph; CORS is locked to `[]` so it cannot be invoked from a browser session.
 - **HTTPS-only, TLS 1.2 minimum, FTPS disabled** on the Function App. HTTP/2 enabled.
-- **`shared_access_key_enabled = true` on the Storage Account** is a known limitation: the Azure Functions **Consumption** runtime requires the legacy `AzureWebJobsStorage` connection string to bootstrap. The connector's own state operations use RBAC via the managed identity, not the keys. To remove the keys entirely you must move to a Premium / Flex Consumption / App Service plan that supports identity-based connections; this is on the roadmap.
+- **Storage Account shared access keys are disabled** (`shared_access_key_enabled = false`). All access — the Function App's deployment bundle, its own state blobs, and the DLQ queue — flows through the user-assigned managed identity with RBAC (Storage Blob Data Owner + Storage Queue Data Contributor). Identity-based `AzureWebJobsStorage` is wired via `AzureWebJobsStorage__accountName`. This is one of the reasons the module runs on Flex Consumption; the older Linux Consumption (Y1) plan required the legacy connection string and could not turn keys off.
 
 ## Prerequisites
 
@@ -248,7 +249,7 @@ If nothing arrives:
 
 For the resources this module creates, the customer pays:
 
-- **Function App (Consumption Y1):** $0 within free tier (1M executions + 400K GB-s/month, perpetual).
+- **Function App (Flex Consumption FC1):** essentially $0 within free grants for typical connector load. Pay-per-execution + GB-s; with 512 MB instances and ~seconds of duration per file, even at thousands of uploads/month the cost stays in cents.
 - **Storage Account:** ~$0.05–1/month (function backing + state blobs + queue).
 - **Key Vault Standard:** ~$0.01/month (per-op pricing only).
 - **App Insights + Log Analytics:** $0 within free tier (5 GB/month).
