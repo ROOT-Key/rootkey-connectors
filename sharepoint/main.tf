@@ -340,8 +340,14 @@ resource "azurerm_function_app_flex_consumption" "func" {
     # AzureWebJobsStorage value is a workaround for an azurerm provider quirk —
     # it must be present (even empty) alongside the __accountName attribute.
     # See https://github.com/hashicorp/terraform-provider-azurerm/pull/29099
-    AzureWebJobsStorage             = ""
+    AzureWebJobsStorage              = ""
     AzureWebJobsStorage__accountName = azurerm_storage_account.func.name
+    # Tell the runtime to authenticate with the user-assigned managed identity
+    # (default is to look for a system-assigned identity, which we don't have).
+    # Required when the Function App has a UAMI but no SAMI — otherwise the
+    # WebJobs storage health check fails with "Unable to access AzureWebJobsStorage".
+    AzureWebJobsStorage__credential = "managedidentity"
+    AzureWebJobsStorage__clientId   = azurerm_user_assigned_identity.func.client_id
 
     ROOTKEY_API_URL     = var.rootkey_api_url
     MAX_FILE_SIZE_BYTES = tostring(var.max_file_size_bytes)
