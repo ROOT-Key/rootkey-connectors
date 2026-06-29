@@ -1,40 +1,44 @@
 # AWS S3 Connector
 
-Deploys a serverless integration into your AWS account. A Lambda function (TypeScript, Node.js 22) triggers on every new object upload to the monitored S3 bucket and uploads the file to the ROOTKey API using your Connector API Key.
+Deploys a serverless integration into your AWS account. An EventBridge rule listens for new objects in the monitored S3 bucket and invokes a Lambda function (TypeScript, Node.js 22) that streams each file to the ROOTKey API using your Connector API Key.
 
 **Why the full file is uploaded:** ROOTKey's cyber resilience guarantee covers recovery — not just detection. Anchoring a hash alone cannot restore a corrupted or encrypted file. The full file content is required so ROOTKey can return the verified original on demand.
 
+## What this module creates
+
+| Resource | Purpose |
+|---|---|
+| `aws_lambda_function` | The connector itself (Node.js 22). |
+| `aws_cloudwatch_event_rule` + `aws_cloudwatch_event_target` | Routes `s3:Object Created` events from EventBridge to the Lambda. |
+| `aws_lambda_permission` | Allows EventBridge to invoke the Lambda, scoped to your account. |
+| `aws_secretsmanager_secret` (+ version) | Stores the ROOTKey API key. The Lambda reads it at cold start; it is **not** stored in plain text as a Lambda env var. |
+| `aws_cloudwatch_log_group` | Pre-created with a configurable retention (default 30 days) — avoids the indefinite retention you'd otherwise inherit. |
+| `aws_sqs_queue` | Dead-letter queue for events that fail after retries. |
+| `aws_lambda_function_event_invoke_config` | 2 async retries before sending the event to the DLQ. |
+| `aws_iam_role_policy` | Inline policy attached to your existing role with exactly the runtime permissions the Lambda needs. |
+
+The module does **not** touch your S3 bucket's notification configuration. That stays under your control.
+
 ## Prerequisites
 
-- An AWS account with the target S3 bucket already created.
-- An IAM Role already created with the following permissions (the Lambda assumes this role):
+### 1. EventBridge notifications enabled on the bucket
 
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Sid": "ReadS3Objects",
-      "Effect": "Allow",
-      "Action": [
-        "s3:GetObject",
-        "s3:GetObjectAttributes"
-      ],
-      "Resource": "arn:aws:s3:::YOUR_BUCKET/*"
-    },
-    {
-      "Sid": "WriteLogs",
-      "Effect": "Allow",
-      "Action": [
-        "logs:CreateLogGroup",
-        "logs:CreateLogStream",
-        "logs:PutLogEvents"
-      ],
-      "Resource": "*"
-    }
-  ]
+This is the only manual setup step. In your existing bucket configuration, enable EventBridge:
+
+**Terraform:**
+```hcl
+resource "aws_s3_bucket_notification" "my_bucket" {
+  bucket      = "my-company-documents"
+  eventbridge = true
+  # ...keep any other notifications you already have here...
 }
 ```
+
+**AWS Console:** S3 → your bucket → Properties → Event notifications → Amazon EventBridge → **Edit** → On.
+
+Because the module never touches `aws_s3_bucket_notification`, you can safely keep any other notifications (Lambda, SQS, SNS) already configured on the bucket — they are untouched.
+
+### 2. A pre-existing IAM Role
 
 The role's trust policy must allow `lambda.amazonaws.com` to assume it:
 
@@ -51,14 +55,21 @@ The role's trust policy must allow `lambda.amazonaws.com` to assume it:
 }
 ```
 
-- [Terraform](https://developer.hashicorp.com/terraform/install) installed (v1.3 or later).
-- [Node.js](https://nodejs.org) 18+ installed on the machine running Terraform (used to compile the Lambda at `terraform apply` time).
+No managed policies are needed on the role — the module attaches an inline policy granting **only** what the Lambda needs at runtime (S3 read of the configured bucket, Secrets Manager read of the API key secret, SQS write to the DLQ, and CloudWatch log writes).
+
+The Terraform principal applying this module needs `iam:PutRolePolicy` on the role ARN.
+
+### 3. Tooling
+
+- [Terraform](https://developer.hashicorp.com/terraform/install) v1.3 or later.
+- [Node.js](https://nodejs.org) 22+ on the machine running Terraform (used to compile the Lambda at `terraform apply` time).
 
 ## Setup
 
-1. **Create the IAM Role** in your AWS account using the policy above. Note its ARN.
-2. **Create a connector** in the ROOTKey dashboard. The IAM Role ARN is required during the wizard. At the end of the wizard, the dashboard generates a pre-filled Terraform block — copy it.
-3. **Apply the Terraform module:**
+1. Enable EventBridge notifications on the bucket (above).
+2. Create the IAM Role in your AWS account. Note its ARN.
+3. Create a connector in the ROOTKey dashboard. The IAM Role ARN is required during the wizard. At the end of the wizard, the dashboard generates a pre-filled Terraform block — copy it.
+4. Apply the Terraform module:
 
 ```bash
 terraform init
@@ -79,8 +90,14 @@ module "rootkey_s3_connector" {
   rootkey_api_key = "rk_conn_xxxxxxxxxxxxxxxxxxxx"
 
   # Optional
-  prefix          = "uploads/"           # monitor only a prefix; omit for the entire bucket
-  rootkey_api_url = "https://api.rootkey.ai"  # default; only change if instructed
+  prefix              = "uploads/"             # monitor only a prefix; omit for the entire bucket
+  rootkey_api_url     = "https://api.rootkey.ai" # default; only change if instructed
+  max_file_size_bytes = 524288000              # default: 500 MiB
+  log_retention_days  = 30                     # default
+  tags = {
+    "cost-center" = "security"
+    "owner"       = "platform-team"
+  }
 }
 ```
 
@@ -88,19 +105,33 @@ module "rootkey_s3_connector" {
 
 | Name | Type | Required | Default | Description |
 |---|---|---|---|---|
-| `bucket_name` | string | yes | — | S3 bucket to monitor |
-| `aws_region` | string | yes | — | AWS region of the bucket |
-| `iam_role_arn` | string | yes | — | ARN of the pre-existing IAM Role the Lambda will assume |
-| `rootkey_api_key` | string | yes | — | Connector API Key from the ROOTKey dashboard |
-| `prefix` | string | no | `""` | S3 key prefix filter; leave empty to monitor the entire bucket |
-| `rootkey_api_url` | string | no | `"https://api.rootkey.ai"` | ROOTKey API base URL |
+| `bucket_name` | string | yes | — | S3 bucket to monitor (EventBridge must be enabled on it). |
+| `aws_region` | string | yes | — | AWS region of the bucket. |
+| `iam_role_arn` | string | yes | — | ARN of the pre-existing IAM Role the Lambda will assume. The module attaches an inline policy to it. |
+| `rootkey_api_key` | string | yes | — | Connector API Key from the ROOTKey dashboard. Stored in Secrets Manager. |
+| `prefix` | string | no | `""` | S3 key prefix filter; leave empty to monitor the entire bucket. |
+| `rootkey_api_url` | string | no | `"https://api.rootkey.ai"` | ROOTKey API base URL. Must use `https://`. |
+| `max_file_size_bytes` | number | no | `524288000` (500 MiB) | Objects larger than this are skipped with an error. Raise only after increasing Lambda memory_size. |
+| `log_retention_days` | number | no | `30` | CloudWatch log retention. Must be a value accepted by AWS (1, 3, 7, 14, 30, 60, 90, …). |
+| `tags` | map(string) | no | `{}` | Extra tags applied to every module-managed resource. |
 
 ## Outputs
 
 | Name | Description |
 |---|---|
-| `lambda_arn` | ARN of the deployed Lambda function |
-| `lambda_function_name` | Name of the deployed Lambda function |
+| `lambda_arn` | ARN of the deployed Lambda function. |
+| `lambda_function_name` | Name of the deployed Lambda function. |
+| `log_group_name` | CloudWatch log group with the Lambda's logs. |
+| `dlq_arn` / `dlq_url` | Dead-letter queue ARN and URL — monitor this for events that failed all retries. |
+| `api_key_secret_arn` | ARN of the Secrets Manager secret holding the API key. |
+| `event_rule_arn` | ARN of the EventBridge rule routing S3 events to the Lambda. |
+
+## Reliability model
+
+- **Async invocation with retries.** EventBridge invokes the Lambda asynchronously. On failure, Lambda's `event_invoke_config` retries 2 more times with exponential backoff. After that the event goes to the SQS DLQ.
+- **Monitor the DLQ.** Set a CloudWatch alarm on `ApproximateNumberOfMessagesVisible` for the DLQ — any non-zero value means at least one file did not reach ROOTKey.
+- **Per-event idempotency.** Each upload carries `x-rootkey-source-bucket`, `x-rootkey-source-key`, `x-rootkey-source-etag` and `x-rootkey-source-version-id` headers so the ROOTKey API can deduplicate redelivered events.
+- **Versioning aware.** When EventBridge reports `version-id`, the Lambda passes it to `GetObject` so the exact version that triggered the event is uploaded, even if the object is overwritten later.
 
 ## Verification
 
@@ -111,6 +142,11 @@ aws s3 cp test.txt s3://my-company-documents/test.txt
 ```
 
 Within a few seconds the file should appear in your ROOTKey vault. You can also check the Lambda logs in CloudWatch under `/aws/lambda/rootkey-s3-connector-<bucket-name>`.
+
+If nothing arrives:
+1. Confirm EventBridge is enabled on the bucket (Properties → Event notifications).
+2. Check the DLQ — `terraform output dlq_url`.
+3. Tail the Lambda logs — `aws logs tail $(terraform output -raw log_group_name) --follow`.
 
 ## License
 

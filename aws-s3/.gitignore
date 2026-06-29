@@ -3,3 +3,6 @@
 *.tfstate
 *.tfstate.backup
 lambda.zip
+node_modules/
+coverage/
+
