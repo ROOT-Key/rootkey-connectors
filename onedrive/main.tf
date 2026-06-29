@@ -343,6 +343,12 @@ resource "azurerm_function_app_flex_consumption" "func" {
     AzureWebJobsStorage__credential = "managedidentity"
     AzureWebJobsStorage__clientId   = azurerm_user_assigned_identity.func.client_id
 
+    # Fail loud if the worker can't import the entry point — without this flag,
+    # a throw during module load silently leaves the host with 0 registered
+    # functions, which is indistinguishable from a genuine empty deployment.
+    # Useful in any hosting plan (not just Y1).
+    FUNCTIONS_NODE_BLOCK_ON_ENTRY_POINT_ERROR = "true"
+
     ROOTKEY_API_URL     = var.rootkey_api_url
     MAX_FILE_SIZE_BYTES = tostring(var.max_file_size_bytes)
 
