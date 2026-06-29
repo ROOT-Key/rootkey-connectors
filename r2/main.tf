@@ -28,12 +28,14 @@ locals {
 # ─── Worker build ──────────────────────────────────────────────────────────────
 
 resource "null_resource" "worker_build" {
+  # Always rebuild on every apply. Source-hash triggers were too narrow: after
+  # `terraform get -update` (which re-clones the module from git and wipes the
+  # local dist/ folder), the source files are unchanged so the hashes match
+  # state — but the dist/ folder is gone, and `data "local_file"` fails with
+  # "no such file or directory". `npm ci && npm run build` is fast (~10s on a
+  # warm cache), so the cost of always running is negligible.
   triggers = {
-    sources_hash = sha256(join("", [
-      for f in fileset("${path.module}/worker/src", "**/*.ts") :
-      filesha256("${path.module}/worker/src/${f}")
-    ]))
-    package_hash = filemd5("${path.module}/worker/package.json")
+    always_run = timestamp()
   }
 
   provisioner "local-exec" {

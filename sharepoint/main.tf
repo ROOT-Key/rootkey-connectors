@@ -67,13 +67,14 @@ locals {
 # ─── Function build ────────────────────────────────────────────────────────────
 
 resource "null_resource" "function_build" {
+  # Always rebuild on every apply. Source-hash triggers were too narrow: after
+  # `terraform get -update` (which re-clones the module from git and wipes the
+  # local dist/ folder), the source files are unchanged so the hashes match
+  # state — but the dist/ folder is gone, and `data "archive_file"` fails with
+  # "could not archive missing directory". `npm ci && npm run build` is fast
+  # (~10s on a warm cache), so the cost of always running is negligible.
   triggers = {
-    sources_hash = sha256(join("", [
-      for f in fileset("${path.module}/function/src", "**/*.ts") :
-      filesha256("${path.module}/function/src/${f}")
-    ]))
-    package_hash = filemd5("${path.module}/function/package.json")
-    host_hash    = filemd5("${path.module}/function/host.json")
+    always_run = timestamp()
   }
 
   provisioner "local-exec" {
