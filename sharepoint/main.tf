@@ -281,6 +281,17 @@ resource "azurerm_linux_function_app" "func" {
     WEBSITE_RUN_FROM_PACKAGE       = "1"
     SCM_DO_BUILD_DURING_DEPLOYMENT = "false"
 
+    # Required by the Azure Functions Node.js v4 programming model: we register
+    # functions programmatically (app.http/app.timer/app.storageQueue) instead
+    # of providing function.json files. Without this flag, the host falls back
+    # to the v3 discovery path and finds zero functions.
+    AzureWebJobsFeatureFlags = "EnableWorkerIndexing"
+
+    # Fail the worker boot loudly if our bundle throws on import — otherwise
+    # startup errors get silently swallowed and the host runs with no
+    # registered functions.
+    FUNCTIONS_NODE_BLOCK_ON_ENTRY_POINT_ERROR = "true"
+
     ROOTKEY_API_URL     = var.rootkey_api_url
     MAX_FILE_SIZE_BYTES = tostring(var.max_file_size_bytes)
 
