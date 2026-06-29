@@ -1,0 +1,29 @@
+# Wrangler configuration. The Worker is deployed by Terraform (cloudflare_workers_script),
+# not by `wrangler deploy` — this file exists mainly for local type-checking and to
+# document the runtime bindings the Worker expects. The actual bindings are injected
+# at deploy time by Terraform; the entries below are for reference.
+
+name = "rootkey-r2-connector"
+main = "dist/index.js"
+compatibility_date = "2024-12-01"
+
+# === Runtime bindings (mirror the Terraform resources) ===
+# main.tf creates the equivalents at deploy time. Do NOT rely on these for prod.
+
+# [[r2_buckets]]
+# binding     = "BUCKET"           # the variable name the Worker reads (env.BUCKET)
+# bucket_name = "your-bucket-name" # overridden per-deployment via Terraform
+
+# [[queues.consumers]]
+# queue                = "rootkey-r2-events"      # name set in Terraform
+# max_batch_size       = 25
+# max_batch_timeout    = 5
+# max_retries          = 5
+# dead_letter_queue    = "rootkey-r2-dlq"
+
+# === Secrets (set via Terraform cloudflare_workers_secret, NEVER committed) ===
+# ROOTKEY_API_KEY      — Connector API Key from the ROOTKey dashboard
+#
+# === Plain env vars (set via Terraform cloudflare_workers_script.plain_text_binding) ===
+# ROOTKEY_API_URL      — default https://api.rootkey.ai
+# MAX_FILE_SIZE_BYTES  — default 524288000 (500 MiB)

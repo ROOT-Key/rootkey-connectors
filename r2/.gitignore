@@ -1,0 +1,8 @@
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.backup
+worker.js
+worker.js.map
+node_modules/
+coverage/
