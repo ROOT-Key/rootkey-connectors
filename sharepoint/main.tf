@@ -163,7 +163,11 @@ resource "time_sleep" "wait_for_storage_rbac" {
 # the bundle changes and reloads the worker; if the bundle is unchanged the blob
 # name is the same and Terraform / Flex are both no-ops.
 resource "azurerm_storage_blob" "deployment_package" {
-  name                   = "function-${data.archive_file.function_zip.output_base64sha256}.zip"
+  # Hex SHA-256 (output_sha256) instead of base64 (output_base64sha256): the
+  # base64 alphabet includes '/' which Azure Blob Storage treats as a virtual
+  # subdirectory separator, so the blob ends up nested inside a virtual folder
+  # that Flex Consumption can't discover. Hex avoids that entirely.
+  name                   = "function-${data.archive_file.function_zip.output_sha256}.zip"
   storage_account_name   = azurerm_storage_account.func.name
   storage_container_name = azurerm_storage_container.deployment.name
   type                   = "Block"
