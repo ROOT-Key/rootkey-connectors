@@ -6,15 +6,32 @@ on:
   pull_request:
 
 jobs:
-  lambda:
-    name: "aws-s3 lambda — typecheck / test / build"
+  functions:
+    name: "${{ matrix.connector.name }} — typecheck / test / build"
     runs-on: ubuntu-latest
     permissions:
       contents: read
 
+    strategy:
+      fail-fast: false
+      matrix:
+        connector:
+          - name: aws-s3 lambda
+            slug: aws-s3-lambda
+            path: aws-s3/lambda
+          - name: onedrive function
+            slug: onedrive-function
+            path: onedrive/function
+          - name: sharepoint function
+            slug: sharepoint-function
+            path: sharepoint/function
+          - name: r2 worker
+            slug: r2-worker
+            path: r2/worker
+
     defaults:
       run:
-        working-directory: aws-s3/lambda
+        working-directory: ${{ matrix.connector.path }}
 
     steps:
       - uses: actions/checkout@v4
@@ -48,7 +65,7 @@ jobs:
               return \`| \${name} | \${pct(d.statements)} | \${pct(d.branches)} | \${pct(d.functions)} | \${pct(d.lines)} |\`;
             });
             const table = [
-              '## Coverage',
+              '## Coverage — ${{ matrix.connector.name }}',
               '',
               '| File | Statements | Branches | Functions | Lines |',
               '|---|---|---|---|---|',
@@ -61,8 +78,8 @@ jobs:
         uses: actions/upload-artifact@v4
         # TODO: pin to SHA — https://github.com/actions/upload-artifact/releases
         with:
-          name: coverage-report
-          path: aws-s3/lambda/coverage/
+          name: coverage-report-${{ matrix.connector.slug }}
+          path: ${{ matrix.connector.path }}/coverage/
           retention-days: 30
 
       - name: Build
