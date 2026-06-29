@@ -264,12 +264,11 @@ resource "azurerm_linux_function_app" "func" {
     minimum_tls_version                    = "1.2"
     http2_enabled                          = true
 
-    # The webhook is called by Microsoft Graph server-to-server. Browser-based
-    # access is not expected and CORS is explicitly closed.
-    cors {
-      allowed_origins     = []
-      support_credentials = false
-    }
+    # No `cors {}` block: the Azure Function App default is no CORS configuration
+    # at all, which means browsers receive no Access-Control-Allow-Origin headers
+    # and cross-origin requests are blocked. The webhook is called by Microsoft
+    # Graph server-to-server, so this is the correct posture. An explicit empty
+    # allowed_origins list is rejected by the azurerm provider (min 1 item).
 
     application_stack {
       node_version = "22"
