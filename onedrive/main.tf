@@ -17,6 +17,10 @@ terraform {
       source  = "hashicorp/archive"
       version = "~> 2.0"
     }
+    time = {
+      source  = "hashicorp/time"
+      version = "~> 0.11"
+    }
   }
 }
 
@@ -143,6 +147,15 @@ resource "azurerm_storage_queue" "dlq" {
   storage_account_id = azurerm_storage_account.func.id
 }
 
+# AAD role assignments are eventually consistent — they typically take 30-60s
+# to propagate. Without this explicit wait, the blob upload below races with
+# the role assignment for the Terraform principal and fails with a 403 on a
+# fresh apply.
+resource "time_sleep" "wait_for_storage_rbac" {
+  depends_on      = [azurerm_role_assignment.storage_blob_terraform]
+  create_duration = "60s"
+}
+
 # Upload the freshly-built function bundle. Blob name is content-hashed so Flex
 # Consumption observes a new deployment when the bundle changes; if unchanged
 # the blob name is the same and both Terraform and Flex are no-ops.
@@ -156,6 +169,7 @@ resource "azurerm_storage_blob" "deployment_package" {
 
   depends_on = [
     azurerm_role_assignment.storage_blob_terraform,
+    time_sleep.wait_for_storage_rbac,
   ]
 }
 
