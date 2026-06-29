@@ -1,0 +1,25 @@
+{
+  "name": "rootkey-onedrive-connector",
+  "version": "1.0.0",
+  "private": true,
+  "main": "dist/src/index.js",
+  "scripts": {
+    "build": "esbuild src/index.ts --bundle --platform=node --target=node22 --outfile=dist/src/index.js --external:@azure/functions-core && cp host.json dist/host.json && cp package.json dist/package.json",
+    "test": "jest",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@azure/functions": "^4.5.0",
+    "@azure/identity": "^4.4.0",
+    "@azure/storage-blob": "^12.24.0",
+    "@azure/storage-queue": "^12.23.0"
+  },
+  "devDependencies": {
+    "@types/jest": "^29.0.0",
+    "@types/node": "^22.0.0",
+    "esbuild": "^0.25.0",
+    "jest": "^29.0.0",
+    "ts-jest": "^29.0.0",
+    "typescript": "^5.0.0"
+  }
+}
