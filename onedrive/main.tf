@@ -75,25 +75,55 @@ locals {
 }
 
 # ─── Function build ────────────────────────────────────────────────────────────
+#
+# We ship the function/ folder as a ready-to-run package — the same shape Azure
+# Functions Core Tools produces when you run `func azure functionapp publish`:
+#
+#   function/
+#   ├── host.json
+#   ├── package.json   (main = "dist/index.js")
+#   ├── node_modules/  (production deps only — devDeps pruned after build)
+#   └── dist/          (compiled JS from tsc)
+#
+# Build sequence:
+#   1. npm ci             — install everything (incl. devDeps like typescript)
+#   2. npm run build      — tsc compiles src/ → dist/
+#   3. npm prune --omit=dev — remove devDependencies so the deployed zip only
+#                             carries runtime packages (@azure/*)
+#
+# The archive then includes the folder as-is, with `excludes` filtering source
+# TypeScript, test files, and tooling that doesn't need to ship.
 
 resource "null_resource" "function_build" {
   # Always rebuild on every apply so the deployment artifact is fresh. The build
   # itself is fast (~10s with a warm npm cache) and ensures the bundle exists
-  # even after `terraform get -update` re-clones the module and wipes dist/.
+  # even after `terraform get -update` re-clones the module and wipes node_modules/.
   triggers = {
     always_run = timestamp()
   }
 
   provisioner "local-exec" {
-    command     = "npm ci && npm run build"
+    # --no-package-lock on prune so the dev workflow's package-lock.json
+    # isn't rewritten as a side-effect of building the deploy artifact.
+    command     = "npm ci && npm run build && npm prune --omit=dev --no-package-lock"
     working_dir = "${path.module}/function"
   }
 }
 
 data "archive_file" "function_zip" {
   type        = "zip"
-  source_dir  = "${path.module}/function/dist"
+  source_dir  = "${path.module}/function"
   output_path = "${path.module}/function.zip"
+
+  excludes = [
+    "src",
+    "coverage",
+    "tsconfig.json",
+    "jest.config.js",
+    "package-lock.json",
+    ".gitignore",
+    "function.zip",
+  ]
 
   depends_on = [null_resource.function_build]
 }
