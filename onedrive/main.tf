@@ -17,17 +17,14 @@ terraform {
       source  = "hashicorp/archive"
       version = "~> 2.0"
     }
-    time = {
-      source  = "hashicorp/time"
-      version = "~> 0.11"
-    }
   }
 }
 
 provider "azurerm" {
-  # storage_use_azuread = true lets the provider use AAD-based auth for storage
-  # data-plane operations (e.g. uploading the deployment blob). Required because
-  # we disable shared access keys on the storage account.
+  # storage_use_azuread = true forces AAD-based auth for any storage data-plane
+  # operations the provider performs. Required because we disable shared access
+  # keys on the storage account; without it the provider falls back to shared
+  # key auth and any data-plane call fails.
   storage_use_azuread = true
   features {
     key_vault {
@@ -177,35 +174,13 @@ resource "azurerm_storage_queue" "dlq" {
   storage_account_id = azurerm_storage_account.func.id
 }
 
-# AAD role assignments are eventually consistent — they typically take 30-60s
-# to propagate. Without this explicit wait, the blob upload below races with
-# the role assignment for the Terraform principal and fails with a 403 on a
-# fresh apply.
-resource "time_sleep" "wait_for_storage_rbac" {
-  depends_on      = [azurerm_role_assignment.storage_blob_terraform]
-  create_duration = "60s"
-}
-
-# Upload the freshly-built function bundle. Blob name is content-hashed so Flex
-# Consumption observes a new deployment when the bundle changes; if unchanged
-# the blob name is the same and both Terraform and Flex are no-ops.
-resource "azurerm_storage_blob" "deployment_package" {
-  # Hex SHA-256 (output_sha256) instead of base64 (output_base64sha256): the
-  # base64 alphabet includes '/' which Azure Blob Storage treats as a virtual
-  # subdirectory separator, so the blob ends up nested inside a virtual folder
-  # that Flex Consumption can't discover. Hex avoids that entirely.
-  name                   = "function-${data.archive_file.function_zip.output_sha256}.zip"
-  storage_account_name   = azurerm_storage_account.func.name
-  storage_container_name = azurerm_storage_container.deployment.name
-  type                   = "Block"
-  source                 = data.archive_file.function_zip.output_path
-  content_md5            = data.archive_file.function_zip.output_md5
-
-  depends_on = [
-    azurerm_role_assignment.storage_blob_terraform,
-    time_sleep.wait_for_storage_rbac,
-  ]
-}
+# Note: the deployment package itself is published AFTER the Function App is
+# created, via `az functionapp deployment source config-zip` in a local-exec
+# below. Flex Consumption only picks up blobs uploaded through that path — it
+# expects a specific blob name (`released-package.zip`) plus a `kudu-state.json`
+# tracker that the platform writes for it. A direct `azurerm_storage_blob` write
+# to the container is silently ignored even when content and permissions are
+# correct, so the upload has to go through the Flex deployment endpoint.
 
 # ─── Key Vault (Graph client secret + ROOTKey API key + webhook secret) ────────
 
@@ -254,13 +229,6 @@ resource "azurerm_key_vault_secret" "webhook_client_state" {
 }
 
 # ─── Role assignments ──────────────────────────────────────────────────────────
-
-# Terraform principal needs to write blobs (upload the deployment package).
-resource "azurerm_role_assignment" "storage_blob_terraform" {
-  scope                = azurerm_storage_account.func.id
-  role_definition_name = "Storage Blob Data Contributor"
-  principal_id         = data.azurerm_client_config.current.object_id
-}
 
 # Function App identity needs to:
 #  - Read the deployment package (Flex Consumption pulls the zip from blob storage)
@@ -402,9 +370,36 @@ resource "azurerm_function_app_flex_consumption" "func" {
     azurerm_role_assignment.kv_reader_func,
     azurerm_role_assignment.storage_blob_func,
     azurerm_role_assignment.storage_queue_func,
-    azurerm_storage_blob.deployment_package,
     azurerm_key_vault_secret.graph_client_secret,
     azurerm_key_vault_secret.rootkey_api_key,
     azurerm_key_vault_secret.webhook_client_state,
   ]
+}
+
+# ─── Deploy the function bundle ────────────────────────────────────────────────
+#
+# `az functionapp deployment source config-zip` is the canonical Microsoft
+# deployment path for Flex Consumption: it uploads the zip as `released-package.zip`
+# in the deployment container AND writes the `kudu-state.json` tracker the host
+# uses to discover the active deployment. Without that tracker, Flex silently
+# ignores anything in the container, which is why a plain `azurerm_storage_blob`
+# upload doesn't work even with correct identity/permissions on the blob itself.
+#
+# Trigger: the zip's SHA-256 hash. If the source code is unchanged across applies
+# the trigger is stable and Terraform skips the deploy step. When code changes,
+# the hash changes and the deploy runs.
+#
+# Prereq: the `az` CLI must be available on PATH where `terraform apply` runs.
+# This is already the case for any Azure deployment workflow, so no new ask of
+# customers.
+resource "null_resource" "function_deploy" {
+  triggers = {
+    zip_hash = data.archive_file.function_zip.output_sha256
+  }
+
+  provisioner "local-exec" {
+    command = "az functionapp deployment source config-zip --src ${data.archive_file.function_zip.output_path} --name ${azurerm_function_app_flex_consumption.func.name} --resource-group ${data.azurerm_resource_group.rg.name}"
+  }
+
+  depends_on = [azurerm_function_app_flex_consumption.func]
 }
