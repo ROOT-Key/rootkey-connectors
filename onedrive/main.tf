@@ -359,9 +359,11 @@ resource "azurerm_function_app_flex_consumption" "func" {
     DLQ_QUEUE_NAME        = azurerm_storage_queue.dlq.name
     UAMI_CLIENT_ID        = azurerm_user_assigned_identity.func.client_id
 
-    GRAPH_CLIENT_SECRET  = "@Microsoft.KeyVault(SecretUri=${azurerm_key_vault_secret.graph_client_secret.versionless_id})"
-    ROOTKEY_API_KEY      = "@Microsoft.KeyVault(SecretUri=${azurerm_key_vault_secret.rootkey_api_key.versionless_id})"
-    WEBHOOK_CLIENT_STATE = "@Microsoft.KeyVault(SecretUri=${azurerm_key_vault_secret.webhook_client_state.versionless_id})"
+    # See sharepoint/main.tf for the rationale — versioned KV URIs force the
+    # Function App to see a real app_settings change on rotation.
+    GRAPH_CLIENT_SECRET  = "@Microsoft.KeyVault(SecretUri=${azurerm_key_vault_secret.graph_client_secret.id})"
+    ROOTKEY_API_KEY      = "@Microsoft.KeyVault(SecretUri=${azurerm_key_vault_secret.rootkey_api_key.id})"
+    WEBHOOK_CLIENT_STATE = "@Microsoft.KeyVault(SecretUri=${azurerm_key_vault_secret.webhook_client_state.id})"
   }
 
   tags = local.common_tags

@@ -383,9 +383,17 @@ resource "azurerm_function_app_flex_consumption" "func" {
     DLQ_QUEUE_NAME        = azurerm_storage_queue.dlq.name
     UAMI_CLIENT_ID        = azurerm_user_assigned_identity.func.client_id
 
-    GRAPH_CLIENT_SECRET  = "@Microsoft.KeyVault(SecretUri=${azurerm_key_vault_secret.graph_client_secret.versionless_id})"
-    ROOTKEY_API_KEY      = "@Microsoft.KeyVault(SecretUri=${azurerm_key_vault_secret.rootkey_api_key.versionless_id})"
-    WEBHOOK_CLIENT_STATE = "@Microsoft.KeyVault(SecretUri=${azurerm_key_vault_secret.webhook_client_state.versionless_id})"
+    # Versioned KV references (not versionless_id) — when the secret rotates,
+    # a new KV version is created and the versioned URI in app_settings changes,
+    # forcing the Function App to see a real setting change and reload the value.
+    # Versionless references cache the resolved value and are only refreshed on
+    # a 24h cycle or (unreliably) on restart; on Flex Consumption we observed
+    # that a restart alone does not always invalidate the cache after a rotation.
+    # Using .id (versioned) makes rotation deterministic — each Terraform apply
+    # that changes the secret propagates the new value immediately.
+    GRAPH_CLIENT_SECRET  = "@Microsoft.KeyVault(SecretUri=${azurerm_key_vault_secret.graph_client_secret.id})"
+    ROOTKEY_API_KEY      = "@Microsoft.KeyVault(SecretUri=${azurerm_key_vault_secret.rootkey_api_key.id})"
+    WEBHOOK_CLIENT_STATE = "@Microsoft.KeyVault(SecretUri=${azurerm_key_vault_secret.webhook_client_state.id})"
   }
 
   tags = local.common_tags
