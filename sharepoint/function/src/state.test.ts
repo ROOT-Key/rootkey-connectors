@@ -241,10 +241,10 @@ describe("tryAcquireSubscriptionsLease (global reconciliation lock)", () => {
     blobUpload.mockResolvedValueOnce(undefined);
     leaseAcquire.mockResolvedValueOnce(undefined);
 
-    const lease = await tryAcquireSubscriptionsLease(stateCfg, 120);
+    const lease = await tryAcquireSubscriptionsLease(stateCfg, 60);
     expect(lease).toBeDefined();
     expect(getBlockBlobClient).toHaveBeenCalledWith("subscriptions-reconciliation.lock");
-    expect(leaseAcquire).toHaveBeenCalledWith(120);
+    expect(leaseAcquire).toHaveBeenCalledWith(60);
 
     leaseRelease.mockResolvedValueOnce(undefined);
     await lease!.release();

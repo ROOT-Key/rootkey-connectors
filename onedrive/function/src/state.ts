@@ -182,7 +182,12 @@ export async function tryAcquireSyncLease(
 // resource, so the race produces a duplicate subscription per drive.
 export async function tryAcquireSubscriptionsLease(
   cfg: StateConfig,
-  durationSeconds: number = 120,
+  // Azure Blob lease duration is capped at 60s for finite leases (or -1 for
+  // infinite). 120s made the storage service reject the request with
+  // "The value for one of the HTTP headers is not in the correct format".
+  // The auto-renew loop in tryAcquireBlobLease keeps the lease alive across
+  // long reconciliation runs regardless.
+  durationSeconds: number = 60,
 ): Promise<LeaseHandle | undefined> {
   return tryAcquireBlobLease(cfg, SUBSCRIPTIONS_LOCK_BLOB, durationSeconds);
 }
