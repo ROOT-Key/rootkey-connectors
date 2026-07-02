@@ -332,16 +332,31 @@ resource "azurerm_function_app_flex_consumption" "func" {
   }
 
   app_settings = {
-    # Identity-based connection to AzureWebJobsStorage. The empty
-    # AzureWebJobsStorage value is a workaround for an azurerm provider quirk —
-    # it must be present (even empty) alongside the __accountName attribute.
-    # See https://github.com/hashicorp/terraform-provider-azurerm/pull/29099
-    AzureWebJobsStorage              = ""
-    AzureWebJobsStorage__accountName = azurerm_storage_account.func.name
+    # Identity-based connection to AzureWebJobsStorage.
+    #
+    # `__accountName` alone is a special-case shorthand the Functions RUNTIME
+    # accepts for its own internal state (leases, singleton locks). It is NOT
+    # honored by the storage-queue / storage-blob extensions that build client
+    # objects for user bindings — those need the full service URIs. Without the
+    # __queueServiceUri below, indexing our dlqReplay queueTrigger fails with
+    #   "Unable to find matching constructor for QueueServiceClient
+    #    Expected: connectionString | serviceUri | ...
+    #    Found:    credential, clientId, accountName"
+    # and the failure poisons the whole indexing pass, so renewSubscription
+    # never runs either. Setting the URIs explicitly is the canonical Flex
+    # Consumption identity-based configuration.
+    #
+    # The empty AzureWebJobsStorage value is a workaround for an azurerm
+    # provider quirk — it must be present (even empty) alongside the
+    # identity-based attributes. See
+    # https://github.com/hashicorp/terraform-provider-azurerm/pull/29099
+    AzureWebJobsStorage                  = ""
+    AzureWebJobsStorage__accountName     = azurerm_storage_account.func.name
+    AzureWebJobsStorage__blobServiceUri  = azurerm_storage_account.func.primary_blob_endpoint
+    AzureWebJobsStorage__queueServiceUri = azurerm_storage_account.func.primary_queue_endpoint
+    AzureWebJobsStorage__tableServiceUri = azurerm_storage_account.func.primary_table_endpoint
     # Tell the runtime to authenticate with the user-assigned managed identity
     # (default is to look for a system-assigned identity, which we don't have).
-    # Required when the Function App has a UAMI but no SAMI — otherwise the
-    # WebJobs storage health check fails with "Unable to access AzureWebJobsStorage".
     AzureWebJobsStorage__credential = "managedidentity"
     AzureWebJobsStorage__clientId   = azurerm_user_assigned_identity.func.client_id
 

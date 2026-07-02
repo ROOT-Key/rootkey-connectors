@@ -328,18 +328,15 @@ resource "azurerm_function_app_flex_consumption" "func" {
   }
 
   app_settings = {
-    # Identity-based connection to AzureWebJobsStorage. The empty
-    # AzureWebJobsStorage value is a workaround for an azurerm provider quirk —
-    # it must be present (even empty) alongside the __accountName attribute.
-    # See https://github.com/hashicorp/terraform-provider-azurerm/pull/29099
-    AzureWebJobsStorage              = ""
-    AzureWebJobsStorage__accountName = azurerm_storage_account.func.name
-    # Tell the runtime to authenticate with the user-assigned managed identity
-    # (default is to look for a system-assigned identity, which we don't have).
-    # Required when the Function App has a UAMI but no SAMI — otherwise the
-    # WebJobs storage health check fails with "Unable to access AzureWebJobsStorage".
-    AzureWebJobsStorage__credential = "managedidentity"
-    AzureWebJobsStorage__clientId   = azurerm_user_assigned_identity.func.client_id
+    # Identity-based connection to AzureWebJobsStorage.
+    # See sharepoint/main.tf for the full rationale — same pattern applied here.
+    AzureWebJobsStorage                  = ""
+    AzureWebJobsStorage__accountName     = azurerm_storage_account.func.name
+    AzureWebJobsStorage__blobServiceUri  = azurerm_storage_account.func.primary_blob_endpoint
+    AzureWebJobsStorage__queueServiceUri = azurerm_storage_account.func.primary_queue_endpoint
+    AzureWebJobsStorage__tableServiceUri = azurerm_storage_account.func.primary_table_endpoint
+    AzureWebJobsStorage__credential      = "managedidentity"
+    AzureWebJobsStorage__clientId        = azurerm_user_assigned_identity.func.client_id
 
     # Fail loud if the worker can't import the entry point — without this flag,
     # a throw during module load silently leaves the host with 0 registered
