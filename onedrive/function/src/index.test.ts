@@ -735,6 +735,6 @@ describe("function registrations", () => {
     const reg = queueRegistrations.find((r) => r.name === "dlqReplay");
     expect(reg).toBeDefined();
     expect(reg?.options.queueName).toBe("dlq");
-    expect(reg?.options.connection).toBe("AzureWebJobsStorage");
+    expect(reg?.options.connection).toBe("DlqStorage");
   });
 });

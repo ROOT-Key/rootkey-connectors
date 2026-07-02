@@ -332,33 +332,38 @@ resource "azurerm_function_app_flex_consumption" "func" {
   }
 
   app_settings = {
-    # Identity-based connection to AzureWebJobsStorage.
+    # ── AzureWebJobsStorage (host runtime state: leases, singletons) ──────────
     #
-    # `__accountName` alone is a special-case shorthand the Functions RUNTIME
-    # accepts for its own internal state (leases, singleton locks). It is NOT
-    # honored by the storage-queue / storage-blob extensions that build client
-    # objects for user bindings — those need the full service URIs. Without the
-    # __queueServiceUri below, indexing our dlqReplay queueTrigger fails with
-    #   "Unable to find matching constructor for QueueServiceClient
-    #    Expected: connectionString | serviceUri | ...
-    #    Found:    credential, clientId, accountName"
-    # and the failure poisons the whole indexing pass, so renewSubscription
-    # never runs either. Setting the URIs explicitly is the canonical Flex
-    # Consumption identity-based configuration.
+    # Identity-based connection using __accountName. The runtime constructs its
+    # own blob/queue/table URIs internally from the account name.
     #
     # The empty AzureWebJobsStorage value is a workaround for an azurerm
     # provider quirk — it must be present (even empty) alongside the
     # identity-based attributes. See
     # https://github.com/hashicorp/terraform-provider-azurerm/pull/29099
-    AzureWebJobsStorage                  = ""
-    AzureWebJobsStorage__accountName     = azurerm_storage_account.func.name
-    AzureWebJobsStorage__blobServiceUri  = azurerm_storage_account.func.primary_blob_endpoint
-    AzureWebJobsStorage__queueServiceUri = azurerm_storage_account.func.primary_queue_endpoint
-    AzureWebJobsStorage__tableServiceUri = azurerm_storage_account.func.primary_table_endpoint
-    # Tell the runtime to authenticate with the user-assigned managed identity
-    # (default is to look for a system-assigned identity, which we don't have).
-    AzureWebJobsStorage__credential = "managedidentity"
-    AzureWebJobsStorage__clientId   = azurerm_user_assigned_identity.func.client_id
+    AzureWebJobsStorage              = ""
+    AzureWebJobsStorage__accountName = azurerm_storage_account.func.name
+    AzureWebJobsStorage__credential  = "managedidentity"
+    AzureWebJobsStorage__clientId    = azurerm_user_assigned_identity.func.client_id
+
+    # ── DlqStorage (dedicated connection for the dlqReplay queue trigger) ─────
+    #
+    # The queue-trigger extension's client factory can't construct a
+    # QueueServiceClient when the connection prefix is "AzureWebJobsStorage"
+    # under identity-based auth on Flex Consumption — the host's special-case
+    # handling of that name breaks the factory's URI translation, producing:
+    #   "Unable to find matching constructor for QueueServiceClient.
+    #    Expected: connectionString | serviceUri | ...
+    #    Found:    tableServiceUri, queueServiceUri, credential, ..."
+    # even when the URIs are set correctly (both flat `__queueServiceUri` and
+    # nested `__queue__serviceUri` forms fail the same way).
+    #
+    # Solution: dedicated connection prefix. The queue trigger references
+    # `DlqStorage` (see src/index.ts), and identity-based auth flows through
+    # the normal path.
+    DlqStorage__queueServiceUri = azurerm_storage_account.func.primary_queue_endpoint
+    DlqStorage__credential      = "managedidentity"
+    DlqStorage__clientId        = azurerm_user_assigned_identity.func.client_id
 
     # Fail loud if the worker can't import the entry point — without this flag,
     # a throw during module load silently leaves the host with 0 registered

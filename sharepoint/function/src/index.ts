@@ -542,8 +542,15 @@ app.timer("renewSubscription", {
   handler: renewSubscriptionHandler,
 });
 
+// Uses a dedicated connection prefix (DlqStorage) instead of
+// AzureWebJobsStorage. The AzureWebJobsStorage connection name has special
+// handling in the host runtime and the storage-queue extension's client factory
+// fails to construct a QueueServiceClient from it under identity-based auth on
+// Flex Consumption ("Unable to find matching constructor ... Expected serviceUri"
+// even with __queueServiceUri set). A plain connection prefix goes through the
+// normal identity-based path and works.
 app.storageQueue("dlqReplay", {
   queueName: DLQ_QUEUE_NAME,
-  connection: "AzureWebJobsStorage",
+  connection: "DlqStorage",
   handler: dlqReplayHandler,
 });

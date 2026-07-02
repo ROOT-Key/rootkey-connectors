@@ -1067,6 +1067,6 @@ describe("function registrations", () => {
   it("registers the DLQ replay storage queue trigger", () => {
     const reg = queueRegistrations.find((r) => r.name === "dlqReplay");
     expect(reg).toBeDefined();
-    expect(reg?.options.connection).toBe("AzureWebJobsStorage");
+    expect(reg?.options.connection).toBe("DlqStorage");
   });
 });

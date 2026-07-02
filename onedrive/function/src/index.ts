@@ -470,8 +470,11 @@ app.timer("renewSubscription", {
   handler: renewSubscriptionHandler,
 });
 
+// See sharepoint/function/src/index.ts for the rationale — dedicated connection
+// prefix works around the identity-based AzureWebJobsStorage incompatibility with
+// the storage-queue extension's client factory on Flex Consumption.
 app.storageQueue("dlqReplay", {
   queueName: DLQ_QUEUE_NAME,
-  connection: "AzureWebJobsStorage",
+  connection: "DlqStorage",
   handler: dlqReplayHandler,
 });

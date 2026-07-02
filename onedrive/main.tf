@@ -328,15 +328,18 @@ resource "azurerm_function_app_flex_consumption" "func" {
   }
 
   app_settings = {
-    # Identity-based connection to AzureWebJobsStorage.
-    # See sharepoint/main.tf for the full rationale — same pattern applied here.
-    AzureWebJobsStorage                  = ""
-    AzureWebJobsStorage__accountName     = azurerm_storage_account.func.name
-    AzureWebJobsStorage__blobServiceUri  = azurerm_storage_account.func.primary_blob_endpoint
-    AzureWebJobsStorage__queueServiceUri = azurerm_storage_account.func.primary_queue_endpoint
-    AzureWebJobsStorage__tableServiceUri = azurerm_storage_account.func.primary_table_endpoint
-    AzureWebJobsStorage__credential      = "managedidentity"
-    AzureWebJobsStorage__clientId        = azurerm_user_assigned_identity.func.client_id
+    # See sharepoint/main.tf for the rationale on the split between
+    # AzureWebJobsStorage (host runtime state) and DlqStorage (dedicated
+    # connection for the queue trigger, which requires a non-special-cased
+    # connection name under identity-based auth on Flex Consumption).
+    AzureWebJobsStorage              = ""
+    AzureWebJobsStorage__accountName = azurerm_storage_account.func.name
+    AzureWebJobsStorage__credential  = "managedidentity"
+    AzureWebJobsStorage__clientId    = azurerm_user_assigned_identity.func.client_id
+
+    DlqStorage__queueServiceUri = azurerm_storage_account.func.primary_queue_endpoint
+    DlqStorage__credential      = "managedidentity"
+    DlqStorage__clientId        = azurerm_user_assigned_identity.func.client_id
 
     # Fail loud if the worker can't import the entry point — without this flag,
     # a throw during module load silently leaves the host with 0 registered
