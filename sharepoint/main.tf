@@ -323,9 +323,13 @@ resource "azurerm_function_app_flex_consumption" "func" {
     identity_ids = [azurerm_user_assigned_identity.func.id]
   }
 
-  # With a single UAMI attached, the Functions runtime uses it automatically
-  # for resolving @Microsoft.KeyVault(...) references in app_settings — there
-  # is no key_vault_reference_identity_id attribute on this resource type.
+  # NOTE: KV reference resolution identity is bound below via a null_resource
+  # that calls `az functionapp update --set keyVaultReferenceIdentity=<UAMI>`.
+  # The azurerm_function_app_flex_consumption resource (as of provider v4.x)
+  # does not expose `key_vault_reference_identity_id` — without setting it,
+  # the platform defaults to SystemAssignedIdentity for KV reference
+  # resolution, which we don't have, so all @Microsoft.KeyVault(...) settings
+  # fail to resolve with MSINotEnabled.
 
   site_config {
     application_insights_connection_string = azurerm_application_insights.ai.connection_string
@@ -408,6 +412,35 @@ resource "azurerm_function_app_flex_consumption" "func" {
   ]
 }
 
+# ─── Bind KV reference resolution to the UAMI ──────────────────────────────────
+#
+# The Function App has a UAMI (no SAMI). On Flex Consumption the platform
+# defaults to SystemAssignedIdentity when resolving @Microsoft.KeyVault(...)
+# references in app_settings — with no SAMI, every KV reference fails to
+# resolve (status=MSINotEnabled) and the runtime sees the literal
+# "@Microsoft.KeyVault(...)" string. AAD then rejects those "secrets"
+# (invalid_client 7000215).
+#
+# The azurerm_function_app_flex_consumption resource (as of provider v4.x)
+# doesn't expose keyVaultReferenceIdentity, so we set it via `az functionapp
+# update --set` after the app exists. This is idempotent — subsequent applies
+# find the property already set and are no-ops.
+resource "null_resource" "kv_reference_identity" {
+  triggers = {
+    uami_id = azurerm_user_assigned_identity.func.id
+    fn_name = azurerm_function_app_flex_consumption.func.name
+  }
+
+  provisioner "local-exec" {
+    command = "az functionapp update --name ${azurerm_function_app_flex_consumption.func.name} --resource-group ${data.azurerm_resource_group.rg.name} --set keyVaultReferenceIdentity=${azurerm_user_assigned_identity.func.id}"
+  }
+
+  depends_on = [
+    azurerm_function_app_flex_consumption.func,
+    azurerm_role_assignment.kv_reader_func,
+  ]
+}
+
 # ─── Deploy the function bundle ────────────────────────────────────────────────
 #
 # `az functionapp deployment source config-zip` is the canonical Microsoft
@@ -433,5 +466,10 @@ resource "null_resource" "function_deploy" {
     command = "az functionapp deployment source config-zip --src ${data.archive_file.function_zip.output_path} --name ${azurerm_function_app_flex_consumption.func.name} --resource-group ${data.azurerm_resource_group.rg.name}"
   }
 
-  depends_on = [azurerm_function_app_flex_consumption.func]
+  depends_on = [
+    azurerm_function_app_flex_consumption.func,
+    # Deploy AFTER keyVaultReferenceIdentity is bound so the restart triggered
+    # by config-zip picks up KV references with the correct identity.
+    null_resource.kv_reference_identity,
+  ]
 }

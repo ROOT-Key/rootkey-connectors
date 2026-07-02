@@ -319,9 +319,9 @@ resource "azurerm_function_app_flex_consumption" "func" {
     identity_ids = [azurerm_user_assigned_identity.func.id]
   }
 
-  # With a single UAMI attached, the Functions runtime uses it automatically
-  # for resolving @Microsoft.KeyVault(...) references in app_settings — there
-  # is no key_vault_reference_identity_id attribute on this resource type.
+  # See sharepoint/main.tf — keyVaultReferenceIdentity is bound below via
+  # a null_resource + az CLI because the flex_consumption resource doesn't
+  # expose it directly.
 
   site_config {
     application_insights_connection_string = azurerm_application_insights.ai.connection_string
@@ -378,6 +378,28 @@ resource "azurerm_function_app_flex_consumption" "func" {
   ]
 }
 
+# ─── Bind KV reference resolution to the UAMI ──────────────────────────────────
+# See sharepoint/main.tf for the full rationale — the platform defaults to
+# SystemAssignedIdentity when resolving KV references and we only have a UAMI,
+# so all @Microsoft.KeyVault(...) settings fail to resolve until we set
+# keyVaultReferenceIdentity to point at our UAMI. The flex_consumption resource
+# doesn't expose the property, so we set it via `az functionapp update`.
+resource "null_resource" "kv_reference_identity" {
+  triggers = {
+    uami_id = azurerm_user_assigned_identity.func.id
+    fn_name = azurerm_function_app_flex_consumption.func.name
+  }
+
+  provisioner "local-exec" {
+    command = "az functionapp update --name ${azurerm_function_app_flex_consumption.func.name} --resource-group ${data.azurerm_resource_group.rg.name} --set keyVaultReferenceIdentity=${azurerm_user_assigned_identity.func.id}"
+  }
+
+  depends_on = [
+    azurerm_function_app_flex_consumption.func,
+    azurerm_role_assignment.kv_reader_func,
+  ]
+}
+
 # ─── Deploy the function bundle ────────────────────────────────────────────────
 #
 # `az functionapp deployment source config-zip` is the canonical Microsoft
@@ -403,5 +425,10 @@ resource "null_resource" "function_deploy" {
     command = "az functionapp deployment source config-zip --src ${data.archive_file.function_zip.output_path} --name ${azurerm_function_app_flex_consumption.func.name} --resource-group ${data.azurerm_resource_group.rg.name}"
   }
 
-  depends_on = [azurerm_function_app_flex_consumption.func]
+  depends_on = [
+    azurerm_function_app_flex_consumption.func,
+    # Deploy AFTER keyVaultReferenceIdentity is bound so the restart triggered
+    # by config-zip picks up KV references with the correct identity.
+    null_resource.kv_reference_identity,
+  ]
 }
