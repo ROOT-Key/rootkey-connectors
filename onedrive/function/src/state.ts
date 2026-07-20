@@ -40,6 +40,28 @@ const SUBSCRIPTION_BLOB = "subscription.json";
 const SYNC_LOCK_BLOB = "delta-sync.lock";
 const SUBSCRIPTIONS_LOCK_BLOB = "subscriptions-reconciliation.lock";
 
+function uploadedItemBlobName(driveId: string, itemId: string): string {
+  // OneDrive currently connects to a single drive, but we keep the driveId in
+  // the blob path for symmetry with SharePoint (multi-drive) and for future-
+  // proofing if the module ever supports multiple drives. Graph itemIds are
+  // URL-safe (base64-like) and go into the blob name as-is.
+  return `uploaded-items/${driveId}/${itemId}.json`;
+}
+
+export interface UploadedItemRecord {
+  // Graph itemId — also the ROOTKey fileId (used as the parent for /versions).
+  fileId: string;
+  // ISO 8601 timestamp of the first successful POST /connectors/files/ for this item.
+  firstUploadedAt: string;
+  // ISO 8601 timestamp of the most recent successful upload (new or version).
+  lastUploadedAt: string;
+  // cTag from Graph as of the last successful upload. Compared against the
+  // current Graph cTag on each delta pass to decide whether the file's content
+  // changed (→ POST /versions) or not (→ skip). cTag is content-only, so
+  // renames and metadata edits don't trigger phantom versions.
+  lastCTag?: string;
+}
+
 function credential(uamiClientId?: string): DefaultAzureCredential {
   return new DefaultAzureCredential(
     uamiClientId ? { managedIdentityClientId: uamiClientId } : undefined,
@@ -102,6 +124,36 @@ export async function writeSubscription(
   subscription: StoredSubscription,
 ): Promise<void> {
   await writeBlobString(cfg, SUBSCRIPTION_BLOB, JSON.stringify(subscription), "application/json");
+}
+
+// ─── Uploaded-items registry ───────────────────────────────────────────────────
+// One blob per Graph item — the routing input for `POST /connectors/files/`
+// (brand new) vs `POST /connectors/files/{parentId}/versions` (edit of a
+// previously uploaded item). Missing blob → new. Existing blob with matching
+// cTag → skip. Existing blob with different cTag → new version.
+
+export async function readUploadedItem(
+  cfg: StateConfig,
+  driveId: string,
+  itemId: string,
+): Promise<UploadedItemRecord | undefined> {
+  const raw = await readBlobAsString(cfg, uploadedItemBlobName(driveId, itemId));
+  if (!raw) return undefined;
+  return JSON.parse(raw) as UploadedItemRecord;
+}
+
+export async function writeUploadedItem(
+  cfg: StateConfig,
+  driveId: string,
+  itemId: string,
+  record: UploadedItemRecord,
+): Promise<void> {
+  await writeBlobString(
+    cfg,
+    uploadedItemBlobName(driveId, itemId),
+    JSON.stringify(record),
+    "application/json",
+  );
 }
 
 export async function sendToDlq(cfg: DlqConfig, message: DlqMessage): Promise<void> {

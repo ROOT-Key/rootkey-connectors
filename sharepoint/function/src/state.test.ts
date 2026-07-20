@@ -41,6 +41,8 @@ import {
   deleteDeltaLink,
   readSubscriptions,
   writeSubscriptions,
+  readUploadedItem,
+  writeUploadedItem,
   sendToDlq,
   tryAcquireSyncLease,
   tryAcquireSubscriptionsLease,
@@ -141,6 +143,52 @@ describe("subscriptions blob", () => {
       siteId: "site-1",
       clientState: "cs",
       subscriptions: [],
+    });
+  });
+});
+
+describe("uploaded-items registry", () => {
+  it("readUploadedItem returns undefined for a missing blob (never uploaded)", async () => {
+    blobDownloadToBuffer.mockRejectedValueOnce({ statusCode: 404 });
+    expect(await readUploadedItem(stateCfg, "d1", "item-x")).toBeUndefined();
+  });
+
+  it("readUploadedItem parses the JSON record when the blob exists", async () => {
+    const record = {
+      fileId: "item-x",
+      firstUploadedAt: "2026-07-01T00:00:00Z",
+      lastUploadedAt: "2026-07-03T12:00:00Z",
+      lastCTag: "c-2",
+    };
+    blobDownloadToBuffer.mockResolvedValueOnce(Buffer.from(JSON.stringify(record)));
+    expect(await readUploadedItem(stateCfg, "d1", "item-x")).toEqual(record);
+  });
+
+  it("readUploadedItem uses the uploaded-items/{driveId}/{itemId}.json path", async () => {
+    blobDownloadToBuffer.mockRejectedValueOnce({ statusCode: 404 });
+    await readUploadedItem(stateCfg, "drive-abc", "01ABCDEF");
+    expect(getBlockBlobClient).toHaveBeenCalledWith("uploaded-items/drive-abc/01ABCDEF.json");
+  });
+
+  it("writeUploadedItem writes the record as JSON at the correct path", async () => {
+    blobUpload.mockResolvedValueOnce(undefined);
+    const record = {
+      fileId: "item-x",
+      firstUploadedAt: "2026-07-01T00:00:00Z",
+      lastUploadedAt: "2026-07-01T00:00:00Z",
+      lastCTag: "c-1",
+    };
+    await writeUploadedItem(stateCfg, "drive-abc", "item-x", record);
+    expect(getBlockBlobClient).toHaveBeenCalledWith("uploaded-items/drive-abc/item-x.json");
+    const args = blobUpload.mock.calls[0];
+    expect(JSON.parse(args[0])).toEqual(record);
+    expect(args[2]).toEqual({ blobHTTPHeaders: { blobContentType: "application/json" } });
+  });
+
+  it("readUploadedItem propagates non-404 storage errors", async () => {
+    blobDownloadToBuffer.mockRejectedValueOnce({ statusCode: 500, code: "InternalError" });
+    await expect(readUploadedItem(stateCfg, "d1", "item-x")).rejects.toMatchObject({
+      statusCode: 500,
     });
   });
 });

@@ -180,9 +180,13 @@ describe("deltaQuery", () => {
       .mockResolvedValueOnce(jsonResponse({ value: [], "@odata.deltaLink": "x" }));
 
     await deltaQuery(cfg, "drive-abc");
-    expect(mockFetch.mock.calls[1][0]).toBe(
-      "https://graph.microsoft.com/v1.0/drives/drive-abc/root/delta",
+    // $select is applied so Graph returns the enriched DriveItem fields (cTag,
+    // createdBy, webUrl, etc.) needed for the metadata pack sent to ROOTKey.
+    expect(mockFetch.mock.calls[1][0]).toMatch(
+      /^https:\/\/graph\.microsoft\.com\/v1\.0\/drives\/drive-abc\/root\/delta\?\$select=/,
     );
+    expect(mockFetch.mock.calls[1][0] as string).toContain("cTag");
+    expect(mockFetch.mock.calls[1][0] as string).toContain("createdBy");
   });
 
   it("uses a fully qualified deltaLink URL directly", async () => {
@@ -202,9 +206,9 @@ describe("deltaQuery", () => {
       .mockResolvedValueOnce(tokenResponse())
       .mockResolvedValueOnce(jsonResponse({ value: [], "@odata.deltaLink": "done" }));
     await deltaQuery(cfg, "drive-abc", "RAW_TOKEN");
-    expect(mockFetch.mock.calls[1][0]).toBe(
-      "https://graph.microsoft.com/v1.0/drives/drive-abc/root/delta?token=RAW_TOKEN",
-    );
+    const url = mockFetch.mock.calls[1][0] as string;
+    expect(url).toContain("token=RAW_TOKEN");
+    expect(url).toContain("$select=");
   });
 
   it("throws on non-2xx response", async () => {
@@ -277,8 +281,11 @@ describe("getItem", () => {
     expect(item?.id).toBe("i1");
     expect(item?.size).toBe(42);
     expect(item?.eTag).toBe("etag-1");
-    const url = mockFetch.mock.calls[1][0];
-    expect(url).toBe("https://graph.microsoft.com/v1.0/drives/drive-1/items/i1");
+    const url = mockFetch.mock.calls[1][0] as string;
+    expect(url).toMatch(
+      /^https:\/\/graph\.microsoft\.com\/v1\.0\/drives\/drive-1\/items\/i1\?\$select=/,
+    );
+    expect(url).toContain("cTag");
   });
 
   it("returns undefined on 404", async () => {

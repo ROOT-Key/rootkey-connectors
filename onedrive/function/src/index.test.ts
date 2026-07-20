@@ -104,6 +104,11 @@ beforeEach(() => {
   reconciliationLease.release.mockResolvedValue(undefined);
   (state.tryAcquireSyncLease as jest.Mock).mockResolvedValue(acquiredLease);
   (state.tryAcquireSubscriptionsLease as jest.Mock).mockResolvedValue(reconciliationLease);
+  // Default: uploaded-items registry has no entry → items are treated as new
+  // (POST /connectors/files/). Tests that exercise the version or skip paths
+  // override this via mockResolvedValueOnce with a record.
+  (state.readUploadedItem as jest.Mock).mockResolvedValue(undefined);
+  (state.writeUploadedItem as jest.Mock).mockResolvedValue(undefined);
 });
 
 // ─── Validation handshake ─────────────────────────────────────────────────────
@@ -184,7 +189,7 @@ describe("notificationHandler — notifications", () => {
       stream: Readable.from([Buffer.from("hello")]),
       size: 5,
     });
-    (rootkey.uploadFileToRootkey as jest.Mock).mockResolvedValueOnce({
+    (rootkey.uploadNewFileToRootkey as jest.Mock).mockResolvedValueOnce({
       status: 201,
       responseBody: "ok",
     });
@@ -197,9 +202,9 @@ describe("notificationHandler — notifications", () => {
     expect(res.status).toBe(202);
     expect(graph.deltaQuery as jest.Mock).toHaveBeenCalledWith(expect.any(Object), "PREV_TOKEN");
     expect(graph.downloadFile as jest.Mock).toHaveBeenCalledTimes(1);
-    expect(rootkey.uploadFileToRootkey as jest.Mock).toHaveBeenCalledTimes(1);
+    expect(rootkey.uploadNewFileToRootkey as jest.Mock).toHaveBeenCalledTimes(1);
     // eTag in the upload metadata should be normalized (quotes stripped)
-    const uploadMeta = (rootkey.uploadFileToRootkey as jest.Mock).mock.calls[0][1];
+    const uploadMeta = (rootkey.uploadNewFileToRootkey as jest.Mock).mock.calls[0][1];
     expect(uploadMeta.eTag).toBe("etag-a,1");
     expect(state.writeDeltaLink as jest.Mock).toHaveBeenCalledWith(
       expect.any(Object),
@@ -223,7 +228,7 @@ describe("notificationHandler — notifications", () => {
       stream: Readable.from([Buffer.from("x")]),
       size: 1,
     });
-    (rootkey.uploadFileToRootkey as jest.Mock).mockResolvedValue({
+    (rootkey.uploadNewFileToRootkey as jest.Mock).mockResolvedValue({
       status: 200,
       responseBody: "ok",
     });
@@ -234,7 +239,7 @@ describe("notificationHandler — notifications", () => {
     );
 
     expect(graph.deltaQuery as jest.Mock).toHaveBeenCalledTimes(2);
-    expect(rootkey.uploadFileToRootkey as jest.Mock).toHaveBeenCalledTimes(2);
+    expect(rootkey.uploadNewFileToRootkey as jest.Mock).toHaveBeenCalledTimes(2);
     expect(state.writeDeltaLink as jest.Mock).toHaveBeenCalledWith(expect.any(Object), "FINAL");
   });
 });
@@ -252,7 +257,7 @@ describe("notificationHandler — retry behaviour", () => {
       stream: Readable.from([Buffer.from("x")]),
       size: 1,
     });
-    (rootkey.uploadFileToRootkey as jest.Mock)
+    (rootkey.uploadNewFileToRootkey as jest.Mock)
       .mockResolvedValueOnce({ status: 503, responseBody: "boom" })
       .mockResolvedValueOnce({ status: 200, responseBody: "ok" });
 
@@ -262,7 +267,7 @@ describe("notificationHandler — retry behaviour", () => {
     );
 
     expect(res.status).toBe(202);
-    expect(rootkey.uploadFileToRootkey as jest.Mock).toHaveBeenCalledTimes(2);
+    expect(rootkey.uploadNewFileToRootkey as jest.Mock).toHaveBeenCalledTimes(2);
     expect(state.sendToDlq as jest.Mock).not.toHaveBeenCalled();
   });
 
@@ -276,7 +281,7 @@ describe("notificationHandler — retry behaviour", () => {
       stream: Readable.from([Buffer.from("x")]),
       size: 1,
     });
-    (rootkey.uploadFileToRootkey as jest.Mock).mockResolvedValue({
+    (rootkey.uploadNewFileToRootkey as jest.Mock).mockResolvedValue({
       status: 503,
       responseBody: "still broken",
     });
@@ -286,7 +291,7 @@ describe("notificationHandler — retry behaviour", () => {
       mockContext(),
     );
 
-    expect(rootkey.uploadFileToRootkey as jest.Mock).toHaveBeenCalledTimes(3);
+    expect(rootkey.uploadNewFileToRootkey as jest.Mock).toHaveBeenCalledTimes(3);
     expect(state.sendToDlq as jest.Mock).toHaveBeenCalledTimes(1);
     const msg = (state.sendToDlq as jest.Mock).mock.calls[0][1];
     expect(msg.itemId).toBe("f1");
@@ -305,7 +310,7 @@ describe("notificationHandler — retry behaviour", () => {
       stream: Readable.from([Buffer.from("x")]),
       size: 1,
     });
-    (rootkey.uploadFileToRootkey as jest.Mock).mockResolvedValueOnce({
+    (rootkey.uploadNewFileToRootkey as jest.Mock).mockResolvedValueOnce({
       status: 400,
       responseBody: "Bad Request",
     });
@@ -315,7 +320,7 @@ describe("notificationHandler — retry behaviour", () => {
       mockContext(),
     );
 
-    expect(rootkey.uploadFileToRootkey as jest.Mock).toHaveBeenCalledTimes(1);
+    expect(rootkey.uploadNewFileToRootkey as jest.Mock).toHaveBeenCalledTimes(1);
     expect(state.sendToDlq as jest.Mock).toHaveBeenCalledTimes(1);
     const msg = (state.sendToDlq as jest.Mock).mock.calls[0][1];
     expect(msg.error).toMatch(/400/);
@@ -331,7 +336,7 @@ describe("notificationHandler — retry behaviour", () => {
       stream: Readable.from([Buffer.from("x")]),
       size: 1,
     });
-    (rootkey.uploadFileToRootkey as jest.Mock)
+    (rootkey.uploadNewFileToRootkey as jest.Mock)
       .mockResolvedValueOnce({ status: 429, responseBody: "too many" })
       .mockResolvedValueOnce({ status: 200, responseBody: "ok" });
 
@@ -340,7 +345,7 @@ describe("notificationHandler — retry behaviour", () => {
       mockContext(),
     );
 
-    expect(rootkey.uploadFileToRootkey as jest.Mock).toHaveBeenCalledTimes(2);
+    expect(rootkey.uploadNewFileToRootkey as jest.Mock).toHaveBeenCalledTimes(2);
     expect(state.sendToDlq as jest.Mock).not.toHaveBeenCalled();
   });
 });
@@ -409,6 +414,150 @@ describe("notificationHandler — edge cases", () => {
       expect.any(Object),
       "https://graph/keep-going",
     );
+  });
+
+  // ─── Registry-based routing (new vs version vs skip) ─────────────────────
+
+  it("routes brand-new items to POST /connectors/files/ and records them", async () => {
+    (state.readDeltaLink as jest.Mock).mockResolvedValueOnce(undefined);
+    (graph.deltaQuery as jest.Mock).mockResolvedValueOnce({
+      items: [{ id: "new-file", name: "n.txt", size: 1, file: {}, cTag: "c-1" }],
+      deltaLink: "D",
+    });
+    (state.readUploadedItem as jest.Mock).mockResolvedValueOnce(undefined);
+    (graph.downloadFile as jest.Mock).mockResolvedValue({
+      stream: Readable.from([Buffer.from("x")]),
+      size: 1,
+    });
+    (rootkey.uploadNewFileToRootkey as jest.Mock).mockResolvedValueOnce({
+      status: 201,
+      responseBody: "created",
+    });
+
+    await notificationHandler(
+      mockRequest({ body: { value: [{ clientState: "secret-state" }] } }),
+      mockContext(),
+    );
+
+    expect(rootkey.uploadNewFileToRootkey as jest.Mock).toHaveBeenCalledTimes(1);
+    expect(rootkey.uploadVersionToRootkey as jest.Mock).not.toHaveBeenCalled();
+    expect(state.writeUploadedItem as jest.Mock).toHaveBeenCalledTimes(1);
+    const write = (state.writeUploadedItem as jest.Mock).mock.calls[0];
+    expect(write[2]).toBe("new-file");
+    expect(write[3]).toMatchObject({ fileId: "new-file", lastCTag: "c-1" });
+  });
+
+  it("routes previously-uploaded items with a new cTag to POST /connectors/files/{id}/versions", async () => {
+    (state.readDeltaLink as jest.Mock).mockResolvedValueOnce(undefined);
+    (graph.deltaQuery as jest.Mock).mockResolvedValueOnce({
+      items: [{ id: "known-file", name: "k.txt", size: 1, file: {}, cTag: "c-2" }],
+      deltaLink: "D",
+    });
+    (state.readUploadedItem as jest.Mock).mockResolvedValueOnce({
+      fileId: "known-file",
+      firstUploadedAt: "2026-06-01T00:00:00Z",
+      lastUploadedAt: "2026-06-01T00:00:00Z",
+      lastCTag: "c-1",
+    });
+    (graph.downloadFile as jest.Mock).mockResolvedValue({
+      stream: Readable.from([Buffer.from("v2")]),
+      size: 2,
+    });
+    (rootkey.uploadVersionToRootkey as jest.Mock).mockResolvedValueOnce({
+      status: 200,
+      responseBody: "versioned",
+    });
+
+    await notificationHandler(
+      mockRequest({ body: { value: [{ clientState: "secret-state" }] } }),
+      mockContext(),
+    );
+
+    expect(rootkey.uploadNewFileToRootkey as jest.Mock).not.toHaveBeenCalled();
+    expect(rootkey.uploadVersionToRootkey as jest.Mock).toHaveBeenCalledTimes(1);
+    const [, parentId] = (rootkey.uploadVersionToRootkey as jest.Mock).mock.calls[0];
+    expect(parentId).toBe("known-file");
+    const write = (state.writeUploadedItem as jest.Mock).mock.calls[0];
+    expect(write[3]).toMatchObject({
+      fileId: "known-file",
+      firstUploadedAt: "2026-06-01T00:00:00Z",
+      lastCTag: "c-2",
+    });
+  });
+
+  it("skips items whose cTag has not changed since the last upload (no download, no upload)", async () => {
+    (state.readDeltaLink as jest.Mock).mockResolvedValueOnce(undefined);
+    (graph.deltaQuery as jest.Mock).mockResolvedValueOnce({
+      items: [{ id: "unchanged", name: "u.txt", size: 1, file: {}, cTag: "same-ctag" }],
+      deltaLink: "D",
+    });
+    (state.readUploadedItem as jest.Mock).mockResolvedValueOnce({
+      fileId: "unchanged",
+      firstUploadedAt: "2026-06-01T00:00:00Z",
+      lastUploadedAt: "2026-06-01T00:00:00Z",
+      lastCTag: "same-ctag",
+    });
+
+    await notificationHandler(
+      mockRequest({ body: { value: [{ clientState: "secret-state" }] } }),
+      mockContext(),
+    );
+
+    expect(graph.downloadFile as jest.Mock).not.toHaveBeenCalled();
+    expect(rootkey.uploadNewFileToRootkey as jest.Mock).not.toHaveBeenCalled();
+    expect(rootkey.uploadVersionToRootkey as jest.Mock).not.toHaveBeenCalled();
+    expect(state.writeUploadedItem as jest.Mock).not.toHaveBeenCalled();
+    expect(state.sendToDlq as jest.Mock).not.toHaveBeenCalled();
+  });
+
+  it("sends the enriched metadata (createdBy, webUrl, path, timestamps) to uploadNewFileToRootkey", async () => {
+    (state.readDeltaLink as jest.Mock).mockResolvedValueOnce(undefined);
+    (graph.deltaQuery as jest.Mock).mockResolvedValueOnce({
+      items: [
+        {
+          id: "meta-file",
+          name: "report.pdf",
+          size: 1024,
+          file: { mimeType: "application/pdf", hashes: { sha256Hash: "hash-abc" } },
+          cTag: "c-1",
+          webUrl: "https://tenant-my.sharepoint.com/personal/x/report.pdf",
+          createdDateTime: "2026-07-01T09:00:00Z",
+          lastModifiedDateTime: "2026-07-03T15:30:00Z",
+          createdBy: { user: { id: "u1", displayName: "Alice", email: "alice@ex.com" } },
+          lastModifiedBy: { user: { id: "u2", displayName: "Bob", email: "bob@ex.com" } },
+          parentReference: { path: "/drive/root:/reports" },
+        },
+      ],
+      deltaLink: "D",
+    });
+    (graph.downloadFile as jest.Mock).mockResolvedValue({
+      stream: Readable.from([Buffer.from("x")]),
+      size: 1,
+    });
+    (rootkey.uploadNewFileToRootkey as jest.Mock).mockResolvedValue({
+      status: 201,
+      responseBody: "ok",
+    });
+
+    await notificationHandler(
+      mockRequest({ body: { value: [{ clientState: "secret-state" }] } }),
+      mockContext(),
+    );
+
+    const [, , metadata] = (rootkey.uploadNewFileToRootkey as jest.Mock).mock.calls[0];
+    expect(metadata).toMatchObject({
+      cTag: "c-1",
+      name: "report.pdf",
+      size: 1024,
+      mimeType: "application/pdf",
+      sha256Hash: "hash-abc",
+      webUrl: "https://tenant-my.sharepoint.com/personal/x/report.pdf",
+      path: "/drive/root:/reports",
+      createdAt: "2026-07-01T09:00:00Z",
+      lastModifiedAt: "2026-07-03T15:30:00Z",
+      createdBy: { id: "u1", displayName: "Alice", email: "alice@ex.com" },
+      lastModifiedBy: { id: "u2", displayName: "Bob", email: "bob@ex.com" },
+    });
   });
 });
 
@@ -608,7 +757,7 @@ describe("dlqReplayHandler", () => {
       stream: Readable.from([Buffer.from("body")]),
       size: 100,
     });
-    (rootkey.uploadFileToRootkey as jest.Mock).mockResolvedValueOnce({
+    (rootkey.uploadNewFileToRootkey as jest.Mock).mockResolvedValueOnce({
       status: 200,
       responseBody: "ok",
     });
@@ -616,7 +765,7 @@ describe("dlqReplayHandler", () => {
     await dlqReplayHandler(validMessage, mockContext());
 
     expect(graph.getItem as jest.Mock).toHaveBeenCalledWith(expect.any(Object), "i1");
-    expect(rootkey.uploadFileToRootkey as jest.Mock).toHaveBeenCalledTimes(1);
+    expect(rootkey.uploadNewFileToRootkey as jest.Mock).toHaveBeenCalledTimes(1);
   });
 
   it("drops the message if itemId is missing (does not throw — avoids infinite re-queue)", async () => {
@@ -661,14 +810,14 @@ describe("dlqReplayHandler", () => {
       stream: Readable.from([Buffer.from("body")]),
       size: 100,
     });
-    (rootkey.uploadFileToRootkey as jest.Mock).mockResolvedValue({
+    (rootkey.uploadNewFileToRootkey as jest.Mock).mockResolvedValue({
       status: 503,
       responseBody: "still down",
     });
 
     await expect(dlqReplayHandler(validMessage, mockContext())).rejects.toThrow(/503/);
     // 3 attempts via the in-function retry budget
-    expect(rootkey.uploadFileToRootkey as jest.Mock).toHaveBeenCalledTimes(3);
+    expect(rootkey.uploadNewFileToRootkey as jest.Mock).toHaveBeenCalledTimes(3);
   });
 
   it("short-circuits on PermanentError (does NOT re-throw — avoids 5x queue retry cycle)", async () => {
@@ -684,7 +833,7 @@ describe("dlqReplayHandler", () => {
 
     // No download/upload attempted; permanent error caught and logged with marker.
     expect(graph.downloadFile as jest.Mock).not.toHaveBeenCalled();
-    expect(rootkey.uploadFileToRootkey as jest.Mock).not.toHaveBeenCalled();
+    expect(rootkey.uploadNewFileToRootkey as jest.Mock).not.toHaveBeenCalled();
     expect(ctx.error).toHaveBeenCalledWith(
       expect.stringContaining("rootkey.event.dlq_replay_terminal_failure"),
     );
@@ -701,7 +850,7 @@ describe("dlqReplayHandler", () => {
       stream: Readable.from([Buffer.from("body")]),
       size: 100,
     });
-    (rootkey.uploadFileToRootkey as jest.Mock).mockResolvedValueOnce({
+    (rootkey.uploadNewFileToRootkey as jest.Mock).mockResolvedValueOnce({
       status: 400,
       responseBody: "validation failed",
     });
@@ -710,7 +859,7 @@ describe("dlqReplayHandler", () => {
     await expect(dlqReplayHandler(validMessage, ctx)).resolves.toBeUndefined();
 
     // 4xx is permanent — only one upload attempt, no retries, no re-throw.
-    expect(rootkey.uploadFileToRootkey as jest.Mock).toHaveBeenCalledTimes(1);
+    expect(rootkey.uploadNewFileToRootkey as jest.Mock).toHaveBeenCalledTimes(1);
     expect(ctx.error).toHaveBeenCalledWith(
       expect.stringContaining("rootkey.event.dlq_replay_terminal_failure"),
     );
@@ -727,7 +876,7 @@ describe("function registrations", () => {
   it("registers the timer with runOnStartup:true", () => {
     const reg = timerRegistrations.find((r) => r.name === "renewSubscription");
     expect(reg).toBeDefined();
-    expect(reg?.options.schedule).toBe("0 0 */12 * * *");
+    expect(reg?.options.schedule).toBe("0 0 */1 * * *");
     expect(reg?.options.runOnStartup).toBe(true);
   });
 

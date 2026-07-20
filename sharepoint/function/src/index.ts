@@ -18,13 +18,19 @@ import {
   SubscriptionGoneError,
   DriveItem,
 } from "./graph";
-import { uploadFileToRootkey } from "./rootkey";
+import {
+  uploadNewFileToRootkey,
+  uploadVersionToRootkey,
+  EnrichedMetadata,
+} from "./rootkey";
 import {
   readDeltaLink,
   writeDeltaLink,
   deleteDeltaLink,
   readSubscriptions,
   writeSubscriptions,
+  readUploadedItem,
+  writeUploadedItem,
   sendToDlq,
   tryAcquireSyncLease,
   tryAcquireSubscriptionsLease,
@@ -266,6 +272,30 @@ async function runDeltaSyncForDrive(
   return { pages, filesProcessed, filesDlqd };
 }
 
+function buildEnrichedMetadata(item: DriveItem): EnrichedMetadata {
+  return {
+    cTag: item.cTag,
+    name: item.name,
+    size: item.size,
+    mimeType: item.file?.mimeType,
+    sha256Hash: item.file?.hashes?.sha256Hash,
+    webUrl: item.webUrl,
+    path: item.parentReference?.path,
+    createdAt: item.createdDateTime,
+    lastModifiedAt: item.lastModifiedDateTime,
+    createdBy: item.createdBy?.user && {
+      id: item.createdBy.user.id,
+      displayName: item.createdBy.user.displayName,
+      email: item.createdBy.user.email,
+    },
+    lastModifiedBy: item.lastModifiedBy?.user && {
+      id: item.lastModifiedBy.user.id,
+      displayName: item.lastModifiedBy.user.displayName,
+      email: item.lastModifiedBy.user.email,
+    },
+  };
+}
+
 async function processFile(
   cfg: Config,
   driveId: string,
@@ -276,6 +306,17 @@ async function processFile(
     throw new PermanentError(
       `Item ${item.id} size ${item.size} exceeds MAX_FILE_SIZE_BYTES=${cfg.maxFileSizeBytes}`,
     );
+  }
+
+  // Check the registry BEFORE downloading — if we've already uploaded this
+  // exact cTag we can skip the whole download+upload path. Costs 1 blob GET.
+  const state = stateCfg(cfg);
+  const existing = await readUploadedItem(state, driveId, item.id);
+  if (existing && item.cTag && existing.lastCTag === item.cTag) {
+    ctx.log(
+      `Skipping item ${item.id} (${item.name}) — cTag unchanged since last upload; no new version.`,
+    );
+    return;
   }
 
   await retryWithBackoff(
@@ -289,20 +330,47 @@ async function processFile(
         );
       }
 
-      const { status, responseBody } = await uploadFileToRootkey(
-        { apiUrl: cfg.rootkeyApiUrl, apiKey: cfg.rootkeyApiKey },
-        {
-          driveId,
-          itemId: item.id,
-          fileName: item.name,
-          eTag: normalizeETag(item.eTag),
-        },
-        stream,
-        contentLength,
-      );
+      const uploadConfig = { apiUrl: cfg.rootkeyApiUrl, apiKey: cfg.rootkeyApiKey };
+      const ident = {
+        driveId,
+        itemId: item.id,
+        fileName: item.name,
+        eTag: normalizeETag(item.eTag),
+      };
+      const metadata = buildEnrichedMetadata(item);
+
+      // Route: brand-new file → POST /connectors/files/
+      //        edit of a known file → POST /connectors/files/{parentId}/versions
+      // `existing` is captured from the outer scope (single fetch above); on
+      // retry the registry state hasn't changed so re-fetching would waste a
+      // GET per attempt.
+      const { status, responseBody } = existing
+        ? await uploadVersionToRootkey(
+            uploadConfig,
+            existing.fileId,
+            ident,
+            metadata,
+            stream,
+            contentLength,
+          )
+        : await uploadNewFileToRootkey(uploadConfig, ident, metadata, stream, contentLength);
 
       if (status >= 200 && status < 300) {
-        ctx.log(`Uploaded item ${item.id} (${item.name}) from drive ${driveId} → ${status}`);
+        const kind = existing ? "version" : "new";
+        ctx.log(
+          `Uploaded ${kind} for item ${item.id} (${item.name}) from drive ${driveId} → ${status}`,
+        );
+        // Only commit the registry write after a 2xx from ROOTKey — never
+        // record intent-to-upload optimistically. On crash before write, the
+        // next delta pass will re-upload; backend must be able to handle the
+        // same cTag arriving twice (see plan doc).
+        const nowIso = new Date().toISOString();
+        await writeUploadedItem(state, driveId, item.id, {
+          fileId: existing?.fileId ?? item.id,
+          firstUploadedAt: existing?.firstUploadedAt ?? nowIso,
+          lastUploadedAt: nowIso,
+          lastCTag: item.cTag,
+        });
         return;
       }
       if (status === 429 || status >= 500) {
@@ -536,8 +604,15 @@ app.http("notification", {
   handler: notificationHandler,
 });
 
+// Hourly cadence. The safety-net delta sync catches any changes that the
+// webhooks missed or delayed (Graph webhook delivery is best-effort and can
+// be delayed by minutes-to-hours), so with a 1h cap the worst-case latency
+// from SharePoint edit → ROOTKey ingestion is roughly (webhook delay) OR
+// (time to next hour), whichever comes first. Subscription renewal (every
+// ~3 days per Graph limits) also flows through this handler; the safety
+// margin against expiry is unaffected by the 1h cadence.
 app.timer("renewSubscription", {
-  schedule: "0 0 */12 * * *",
+  schedule: "0 0 */1 * * *",
   runOnStartup: true,
   handler: renewSubscriptionHandler,
 });

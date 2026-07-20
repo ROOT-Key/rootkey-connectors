@@ -26,15 +26,45 @@ The module **does not** create or modify the Azure Entra ID App Registration —
 The Function App runs **three** registered functions:
 
 1. **`notification`** (HTTP POST `/api/notification`) — receives Graph webhook notifications. Validates the `clientState`, acquires a singleton blob lease (so only one instance syncs at a time), and runs the delta query loop, sending failed items to the DLQ.
-2. **`renewSubscription`** (Timer every 12h **with `runOnStartup: true`**) — creates the Graph subscription on first run, renews it before each expiry, and runs a safety-net delta sync to catch up on any missed notifications. The `runOnStartup` flag guarantees that the subscription is created within seconds of `terraform apply` finishing.
+2. **`renewSubscription`** (Timer every **1 hour** **with `runOnStartup: true`**) — creates the Graph subscription on first run, renews it before each expiry, and runs a safety-net delta sync to catch up on any missed notifications. The 1-hour cadence caps the worst-case latency between an edit in OneDrive and ingestion into ROOTKey to (Graph webhook delay) OR (time to next hour), whichever comes first. The `runOnStartup` flag guarantees that the subscription is created within seconds of `terraform apply` finishing.
 3. **`dlqReplay`** (Storage Queue trigger on `rootkey-dlq`) — automatically reprocesses every DLQ message: re-fetches the item from Graph (it may have changed or been deleted), and runs the same upload pipeline. If processing still fails, the queue retries with exponential backoff up to 5 times before moving the message to the `rootkey-dlq-poison` queue for human attention.
+
+## What the connector sends to ROOTKey
+
+Every upload is a `POST` to either `/api-v1/connectors/files/` (new file) or `/api-v1/connectors/files/{parentId}/versions` (new version of a known file). The routing is decided per item using the local upload registry — see the "Reliability model" section below.
+
+Each request is a `multipart/form-data` body with two parts:
+
+- **`file`** — the raw file bytes streamed from Graph.
+- **`metadata`** — a JSON document containing everything Graph exposes about the file. Absent fields are omitted:
+
+```json
+{
+  "cTag": "\"c:{...}\"",
+  "name": "Contract v3.pdf",
+  "size": 452301,
+  "mimeType": "application/pdf",
+  "sha256Hash": "6f4b...",
+  "webUrl": "https://contoso-my.sharepoint.com/personal/alice_contoso_com/Documents/Contract%20v3.pdf",
+  "path": "/drive/root:/contracts",
+  "createdAt": "2026-07-01T09:12:04Z",
+  "lastModifiedAt": "2026-07-03T15:44:22Z",
+  "createdBy": { "id": "<entra-guid>", "displayName": "Alice Doe", "email": "alice@contoso.com" },
+  "lastModifiedBy": { "id": "<entra-guid>", "displayName": "Alice Doe", "email": "alice@contoso.com" }
+}
+```
+
+Plus the same headers the pre-v2 contract already carried (`x-api-key`, `x-rootkey-source-drive-id`, `x-rootkey-source-item-id`, `x-rootkey-source-etag`) so the backend can route/dedupe without parsing the multipart body. The `x-rootkey-source-item-id` doubles as the ROOTKey `fileId` on new-file uploads and matches the `{parentId}` in the versions URL.
+
+The pack was designed to sustain **NIS2 / DORA-style audit trails** out of the box: for every change to a document you can answer *who* (Entra identity), *when* (timestamps in UTC), *where* (path + `webUrl`), and *what* (name, size, MIME, content hash). Fields flow through unchanged to the ROOTKey dashboard where they surface in the file's history view.
 
 ## Reliability model
 
 - **Per-file retry budget.** Every upload to the ROOTKey API gets **3 attempts** total (initial + 2 retries) with exponential backoff (1s → 2s, capped at 30s) and jitter. Retries trigger on 429, 5xx, and network/timeout errors. 4xx (other than 429) is permanent — it goes straight to the DLQ.
 - **Singleton sync via blob lease.** A sentinel blob `delta-sync.lock` is leased for the duration of each delta sync. Concurrent webhook invocations on the same drive return `202 Accepted` and let the holding instance complete. The lease auto-expires after 60s if the holder crashes, and is renewed every 45s while a sync is active.
-- **Self-registering subscription.** On boot (`runOnStartup`) and every 12h, the timer ensures the Graph subscription exists and is renewed. If the upstream subscription has been deleted (404 on PATCH), the timer recreates it.
-- **Safety-net delta sync.** The same timer runs a delta query after subscription bookkeeping — so even if a webhook notification is dropped, the missed changes are picked up within 12h.
+- **Self-registering subscription.** On boot (`runOnStartup`) and every hour, the timer ensures the Graph subscription exists and is renewed. If the upstream subscription has been deleted (404 on PATCH), the timer recreates it.
+- **Safety-net delta sync.** The same timer runs a delta query after subscription bookkeeping — so even if a webhook notification is dropped, the missed changes are picked up within an hour.
+- **Version-aware uploads.** For each file the connector has ever anchored, a small state blob is kept in `connector-state/uploaded-items/{driveId}/{itemId}.json` recording the Graph `cTag` at the time of last upload. On subsequent delta passes: a new item is POSTed to `/api-v1/connectors/files/` (root file creation); an item whose `cTag` has changed is POSTed to `/api-v1/connectors/files/{parentId}/versions` (new version); an item whose `cTag` is unchanged is skipped without downloading. This preserves the full history of every file (audit trail) and avoids re-uploading content that hasn't actually mutated (rename or metadata-only edits are ignored).
 - **DLQ replay.** Messages on the DLQ are automatically reprocessed by the `dlqReplay` queue trigger. No manual intervention is required for transient failures.
 - **clientState validation.** Every notification carries a 32-char random `clientState` (generated at apply time and stored in Key Vault). Notifications with a missing or mismatched clientState are rejected with `401`.
 - **Page cap.** The delta loop caps at 50 pages per invocation; if a drive is generating more changes than that, the cursor is persisted and the next invocation picks up where it left off.
@@ -63,7 +93,7 @@ In your Azure Entra ID tenant:
    - Redirect URI: leave blank.
 
 2. **API permissions → Add a permission → Microsoft Graph → Application permissions:**
-   - `Files.Read.All`
+   - `Files.ReadWrite.All` — required by Graph specifically for **creating change-notification subscriptions** on drive resources. The connector never writes to files; the permission naming is a Microsoft-Graph quirk. For `/drives/{id}/root` subscriptions the required application permission is `Files.ReadWrite.All` per [the subscription resource docs](https://learn.microsoft.com/en-us/graph/api/subscription-post-subscriptions).
 
    Then **Grant admin consent for [your tenant]**.
 
@@ -243,7 +273,7 @@ If nothing arrives:
 2. **Check the DLQ.** `az storage message peek …` (see above).
 3. **Check the poison queue (`rootkey-dlq-poison`)** for items that failed all replay attempts.
 4. **Check App Insights traces** for errors from `notification`, `renewSubscription`, or `dlqReplay`.
-5. **Confirm Graph permissions.** Azure Entra ID → App registrations → API permissions: `Files.Read.All` must be granted with admin consent.
+5. **Confirm Graph permissions.** Azure Entra ID → App registrations → API permissions: `Files.ReadWrite.All` must be granted with admin consent (required for subscription creation on drive resources; see Prerequisites).
 
 ## Cost
 

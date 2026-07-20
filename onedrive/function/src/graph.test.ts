@@ -72,8 +72,14 @@ describe("deltaQuery", () => {
     expect(res.items).toHaveLength(1);
     expect(res.deltaLink).toContain("token=NEW");
 
-    const url = mockFetch.mock.calls[1][0];
-    expect(url).toBe("https://graph.microsoft.com/v1.0/drives/drive-abc/root/delta");
+    // $select is applied so Graph returns the enriched DriveItem fields (cTag,
+    // createdBy, webUrl, etc.) needed for the metadata pack sent to ROOTKey.
+    const url = mockFetch.mock.calls[1][0] as string;
+    expect(url).toMatch(
+      /^https:\/\/graph\.microsoft\.com\/v1\.0\/drives\/drive-abc\/root\/delta\?\$select=/,
+    );
+    expect(url).toContain("cTag");
+    expect(url).toContain("createdBy");
   });
 
   it("uses a fully qualified deltaLink URL directly when passed", async () => {
@@ -91,9 +97,9 @@ describe("deltaQuery", () => {
       .mockResolvedValueOnce(jsonResponse({ value: [], "@odata.deltaLink": "done" }));
 
     await deltaQuery(cfg, "RAW_TOKEN_VALUE");
-    expect(mockFetch.mock.calls[1][0]).toBe(
-      "https://graph.microsoft.com/v1.0/drives/drive-abc/root/delta?token=RAW_TOKEN_VALUE",
-    );
+    const url = mockFetch.mock.calls[1][0] as string;
+    expect(url).toContain("token=RAW_TOKEN_VALUE");
+    expect(url).toContain("$select=");
   });
 
   it("forwards nextLink and deltaLink fields", async () => {

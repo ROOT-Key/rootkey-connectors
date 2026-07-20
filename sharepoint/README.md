@@ -28,16 +28,46 @@ The module **does not** create or modify the Azure Entra ID App Registration —
 The Function App runs **three** registered functions:
 
 1. **`notification`** (HTTP POST `/api/notification`) — receives Graph webhook notifications for any of the site's drives. Validates the `clientState`, maps each notification's `subscriptionId` to the originating drive via the stored `subscriptions.json`, acquires a per-drive sync lease (so concurrent invocations for the same drive serialize), and runs the delta query loop.
-2. **`renewSubscription`** (Timer every 12h **with `runOnStartup: true`**) — acquires a **global reconciliation lease**, re-resolves the site, lists all current drives, renews existing subscriptions, creates subscriptions for newly-added drives, deletes subscriptions for removed drives, and runs a safety-net delta sync for each drive. The `runOnStartup` flag guarantees that the connector starts working within seconds of `terraform apply` finishing.
+2. **`renewSubscription`** (Timer every **1 hour** **with `runOnStartup: true`**) — acquires a **global reconciliation lease**, re-resolves the site, lists all current drives, renews existing subscriptions, creates subscriptions for newly-added drives, deletes subscriptions for removed drives, and runs a safety-net delta sync for each drive. The 1-hour cadence caps the worst-case latency between an edit in SharePoint and ingestion into ROOTKey to (Graph webhook delay) OR (time to next hour), whichever comes first. The `runOnStartup` flag guarantees that the connector starts working within seconds of `terraform apply` finishing.
 3. **`dlqReplay`** (Storage Queue trigger on `rootkey-dlq`) — automatically reprocesses every DLQ message: re-fetches the item from Graph (it may have changed or been deleted), and runs the same upload pipeline. Permanent errors (oversize, 4xx) are caught and short-circuited with a stable log marker; transient errors propagate so the queue retries with backoff up to 5 times before moving the message to the `rootkey-dlq-poison` queue.
+
+## What the connector sends to ROOTKey
+
+Every upload is a `POST` to either `/api-v1/connectors/files/` (new file) or `/api-v1/connectors/files/{parentId}/versions` (new version of a known file). The routing is decided per item using the local upload registry — see the "Reliability model" section below.
+
+Each request is a `multipart/form-data` body with two parts:
+
+- **`file`** — the raw file bytes streamed from Graph.
+- **`metadata`** — a JSON document containing everything Graph exposes about the file. Absent fields are omitted (Graph doesn't always populate `sha256Hash` on very large files, `email` on app-created items, etc.):
+
+```json
+{
+  "cTag": "\"c:{...}\"",
+  "name": "Q3 board deck.pptx",
+  "size": 8342112,
+  "mimeType": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  "sha256Hash": "6f4b...",
+  "webUrl": "https://contoso.sharepoint.com/sites/board/Shared%20Documents/Q3%20board%20deck.pptx",
+  "path": "/drives/{driveId}/root:/board-packs",
+  "createdAt": "2026-07-01T09:12:04Z",
+  "lastModifiedAt": "2026-07-03T15:44:22Z",
+  "createdBy": { "id": "<entra-guid>", "displayName": "Alice Doe", "email": "alice@contoso.com" },
+  "lastModifiedBy": { "id": "<entra-guid>", "displayName": "Bob Roe", "email": "bob@contoso.com" }
+}
+```
+
+Plus the same headers the pre-v2 contract already carried (`x-api-key`, `x-rootkey-source-drive-id`, `x-rootkey-source-item-id`, `x-rootkey-source-etag`) so the backend can route/dedupe without parsing the multipart body. The `x-rootkey-source-item-id` doubles as the ROOTKey `fileId` on new-file uploads and matches the `{parentId}` in the versions URL.
+
+The pack was designed to sustain **NIS2 / DORA-style audit trails** out of the box: for every change to a document you can answer *who* (Entra identity), *when* (timestamps in UTC), *where* (path + `webUrl`), and *what* (name, size, MIME, content hash). Fields flow through unchanged to the ROOTKey dashboard where they surface in the file's history view.
 
 ## Reliability model
 
 - **Per-file retry budget.** Every upload to the ROOTKey API gets **3 attempts** total (initial + 2 retries) with exponential backoff (1s → 2s, capped at 30s) and jitter. Retries trigger on 429, 5xx, and network/timeout errors. 4xx (other than 429) is a `PermanentError` — it goes straight to the DLQ.
 - **Per-drive sync lease.** Each drive has its own lock blob `delta-sync-{driveId}.lock`. Concurrent webhook invocations for the same drive serialize; independent drives sync in parallel. Leases auto-expire after 60s if the holder crashes and are renewed every 45s while a sync is active.
 - **Global subscriptions reconciliation lease.** `subscriptions-reconciliation.lock` serializes the timer's reconciliation across Function App instances. Without it, two concurrent timer runs would race on `subscriptions.json` and create duplicate Graph subscriptions per drive (Graph allows duplicates per resource — each duplicate generates an extra notification per change).
-- **Self-registering subscriptions.** On boot (`runOnStartup`) and every 12h, the timer ensures every current drive has exactly one subscription. If an upstream subscription was deleted (404 on PATCH), the timer recreates it. If a drive was removed from the site, its subscription and delta cursor are deleted.
-- **Safety-net delta sync.** The same timer runs a delta query per drive after reconciliation — so even if a webhook notification is dropped, the missed changes are picked up within 12h.
+- **Self-registering subscriptions.** On boot (`runOnStartup`) and every hour, the timer ensures every current drive has exactly one subscription. If an upstream subscription was deleted (404 on PATCH), the timer recreates it. If a drive was removed from the site, its subscription and delta cursor are deleted.
+- **Safety-net delta sync.** The same timer runs a delta query per drive after reconciliation — so even if a webhook notification is dropped, the missed changes are picked up within an hour.
+- **Version-aware uploads.** For each file the connector has ever anchored, a small state blob is kept in `connector-state/uploaded-items/{driveId}/{itemId}.json` recording the Graph `cTag` at the time of last upload. On subsequent delta passes: a new item is POSTed to `/api-v1/connectors/files/` (root file creation); an item whose `cTag` has changed is POSTed to `/api-v1/connectors/files/{parentId}/versions` (new version); an item whose `cTag` is unchanged is skipped without downloading. This preserves the full history of every file (audit trail) and avoids re-uploading content that hasn't actually mutated (rename or metadata-only edits are ignored).
 - **DLQ replay.** Messages on the DLQ are automatically reprocessed by the `dlqReplay` queue trigger. No manual intervention is required for transient failures.
 - **clientState validation.** Every notification carries a 32-char random `clientState` (generated at apply time and stored in Key Vault). Notifications with a missing or mismatched clientState are rejected with `401`.
 - **Page cap.** The delta loop caps at 50 pages (~10 000 items at default Graph page size) per invocation per drive; if a drive is generating more changes than that, the cursor is persisted and the next invocation picks up where it left off.
@@ -65,8 +95,8 @@ This is the only manual identity setup. In your Azure Entra ID tenant:
    - Redirect URI: leave blank.
 
 2. **API permissions → Add a permission → Microsoft Graph → Application permissions:**
-   - `Sites.Read.All`
-   - `Files.Read.All`
+   - `Sites.Read.All` — enumerate the site and its drives.
+   - `Files.ReadWrite.All` — required by Graph specifically for **creating change-notification subscriptions** on drive resources. The connector never writes to files; the permission naming is a Microsoft-Graph quirk. Read the `permissions` column in [the subscription resource docs](https://learn.microsoft.com/en-us/graph/api/subscription-post-subscriptions) — for `/drives/{id}/root` the required application permission is `Files.ReadWrite.All`.
 
    Then **Grant admin consent for [your tenant]**.
 

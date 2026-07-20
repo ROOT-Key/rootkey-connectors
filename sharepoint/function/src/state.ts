@@ -54,6 +54,27 @@ function syncLockBlobName(driveId: string): string {
   return `delta-sync-${driveId}.lock`;
 }
 
+function uploadedItemBlobName(driveId: string, itemId: string): string {
+  // Grouped under `uploaded-items/<driveId>/` so a customer with many drives can
+  // list per-drive state cheaply (single prefix listing). Graph itemIds are
+  // URL-safe (base64-like) and go into the blob name as-is.
+  return `uploaded-items/${driveId}/${itemId}.json`;
+}
+
+export interface UploadedItemRecord {
+  // Graph itemId — also the ROOTKey fileId (used as the parent for /versions).
+  fileId: string;
+  // ISO 8601 timestamp of the first successful POST /connectors/files/ for this item.
+  firstUploadedAt: string;
+  // ISO 8601 timestamp of the most recent successful upload (new or version).
+  lastUploadedAt: string;
+  // cTag from Graph as of the last successful upload. Compared against the
+  // current Graph cTag on each delta pass to decide whether the file's content
+  // changed (→ POST /versions) or not (→ skip). cTag is content-only, so
+  // renames and metadata edits don't trigger phantom versions.
+  lastCTag?: string;
+}
+
 function credential(uamiClientId?: string): DefaultAzureCredential {
   return new DefaultAzureCredential(
     uamiClientId ? { managedIdentityClientId: uamiClientId } : undefined,
@@ -133,6 +154,39 @@ export async function writeSubscriptions(
   data: SubscriptionsBlob,
 ): Promise<void> {
   await writeBlobString(cfg, SUBSCRIPTIONS_BLOB, JSON.stringify(data), "application/json");
+}
+
+// ─── Uploaded-items registry ───────────────────────────────────────────────────
+// The registry decides whether a given Graph item is a NEW file (never seen)
+// or an EDIT of a previously-uploaded file. It is the routing input for
+// `POST /connectors/files/` vs `POST /connectors/files/{parentId}/versions`.
+//
+// One blob per item — see uploadedItemBlobName. Cost at scale is discussed in
+// the plan file (`~$33/month for 10M events/month at Hot LRS`); acceptable for
+// current volumes without in-memory caching.
+
+export async function readUploadedItem(
+  cfg: StateConfig,
+  driveId: string,
+  itemId: string,
+): Promise<UploadedItemRecord | undefined> {
+  const raw = await readBlobAsString(cfg, uploadedItemBlobName(driveId, itemId));
+  if (!raw) return undefined;
+  return JSON.parse(raw) as UploadedItemRecord;
+}
+
+export async function writeUploadedItem(
+  cfg: StateConfig,
+  driveId: string,
+  itemId: string,
+  record: UploadedItemRecord,
+): Promise<void> {
+  await writeBlobString(
+    cfg,
+    uploadedItemBlobName(driveId, itemId),
+    JSON.stringify(record),
+    "application/json",
+  );
 }
 
 export async function sendToDlq(cfg: DlqConfig, message: DlqMessage): Promise<void> {

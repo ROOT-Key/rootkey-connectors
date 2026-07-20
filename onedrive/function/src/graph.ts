@@ -7,16 +7,52 @@ export interface GraphConfig {
   driveId: string;
 }
 
+export interface IdentitySet {
+  user?: { id?: string; displayName?: string; email?: string };
+}
+
 export interface DriveItem {
   id: string;
   name: string;
   size: number;
-  file?: { mimeType?: string };
+  file?: {
+    mimeType?: string;
+    hashes?: { quickXorHash?: string; sha256Hash?: string; crc32Hash?: string };
+  };
   folder?: object;
   deleted?: object;
   eTag?: string;
-  parentReference?: { id?: string; path?: string };
+  // cTag mutates only on content changes (not renames or metadata edits) — used
+  // as the version discriminator when deciding whether to POST a new version to
+  // ROOTKey. See index.ts:processFile for the routing decision.
+  cTag?: string;
+  webUrl?: string;
+  createdDateTime?: string;
+  lastModifiedDateTime?: string;
+  createdBy?: IdentitySet;
+  lastModifiedBy?: IdentitySet;
+  parentReference?: { id?: string; path?: string; driveId?: string };
 }
+
+// Fields the connector wants Graph to return on delta and get-item calls. Kept
+// as a single constant so delta and getItem stay in sync — adding a field here
+// exposes it everywhere.
+const DRIVE_ITEM_SELECT = [
+  "id",
+  "name",
+  "size",
+  "file",
+  "folder",
+  "deleted",
+  "eTag",
+  "cTag",
+  "webUrl",
+  "createdDateTime",
+  "lastModifiedDateTime",
+  "createdBy",
+  "lastModifiedBy",
+  "parentReference",
+].join(",");
 
 export interface DeltaResult {
   items: DriveItem[];
@@ -38,7 +74,8 @@ export class SubscriptionGoneError extends Error {
 }
 
 // Microsoft Graph limit for driveItem subscriptions: ~4230 minutes (< 3 days).
-// We renew 30 minutes before that, every 12 hours, to stay well within bounds.
+// We renew 30 minutes before that; the renewal timer runs hourly so the actual
+// gap is at most 1 hour, well within the safety margin.
 const MAX_SUBSCRIPTION_MINUTES = 4230;
 const RENEWAL_SAFETY_MARGIN_MINUTES = 30;
 
@@ -84,11 +121,12 @@ export async function deltaQuery(cfg: GraphConfig, urlOrToken?: string): Promise
   const token = await getAccessToken(cfg);
   let url: string;
   if (!urlOrToken) {
-    url = `https://graph.microsoft.com/v1.0/drives/${cfg.driveId}/root/delta`;
+    url = `https://graph.microsoft.com/v1.0/drives/${cfg.driveId}/root/delta?$select=${DRIVE_ITEM_SELECT}`;
   } else if (urlOrToken.startsWith("https://")) {
+    // Continuation link already carries the $select from the initial request.
     url = urlOrToken;
   } else {
-    url = `https://graph.microsoft.com/v1.0/drives/${cfg.driveId}/root/delta?token=${encodeURIComponent(urlOrToken)}`;
+    url = `https://graph.microsoft.com/v1.0/drives/${cfg.driveId}/root/delta?token=${encodeURIComponent(urlOrToken)}&$select=${DRIVE_ITEM_SELECT}`;
   }
   const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
   if (!res.ok) {
@@ -108,7 +146,7 @@ export async function deltaQuery(cfg: GraphConfig, urlOrToken?: string): Promise
 
 export async function getItem(cfg: GraphConfig, itemId: string): Promise<DriveItem | undefined> {
   const token = await getAccessToken(cfg);
-  const url = `https://graph.microsoft.com/v1.0/drives/${cfg.driveId}/items/${encodeURIComponent(itemId)}`;
+  const url = `https://graph.microsoft.com/v1.0/drives/${cfg.driveId}/items/${encodeURIComponent(itemId)}?$select=${DRIVE_ITEM_SELECT}`;
   const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
   if (res.status === 404) return undefined;
   if (!res.ok) {
