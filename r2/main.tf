@@ -1,13 +1,29 @@
 terraform {
-  required_version = ">= 1.3"
+  # Pinned to the same floor as the other three connectors so the repo has one
+  # Terraform version to support and CI has one version to install. Unlike
+  # sharepoint/onedrive/aws-s3, this module does not itself need 1.11 for
+  # write-only arguments — the Cloudflare provider does not implement any (see
+  # the "Secrets and Terraform state" section of README.md).
+  required_version = ">= 1.11"
   required_providers {
     cloudflare = {
-      source  = "cloudflare/cloudflare"
-      version = "~> 5.0"
+      source = "cloudflare/cloudflare"
+      # Floor verified by validating this module against the provider, not read
+      # off the changelog. "~> 5.0" is NOT enough: it also resolves 5.0.x, where
+      # `cloudflare_r2_bucket_event_notification` does not exist at all and the
+      # worker secret is still its own `cloudflare_workers_secret` resource —
+      # `terraform validate` fails there. Do not loosen it back.
+      version = ">= 5.25.0, < 6.0.0"
     }
     null = {
       source  = "hashicorp/null"
       version = "~> 3.0"
+    }
+    # Pinned explicitly: `data "local_file"` below made this an implicit
+    # dependency, which Terraform resolved to "latest" on every fresh init.
+    local = {
+      source  = "hashicorp/local"
+      version = "~> 2.0"
     }
   }
 }
@@ -78,51 +94,58 @@ resource "cloudflare_workers_script" "connector" {
 
   content = data.local_file.worker_bundle.content
 
-  bindings = concat(
-    [
-      {
-        name        = "BUCKET"
-        type        = "r2_bucket"
-        bucket_name = var.bucket_name
-      },
-      {
-        name = "ROOTKEY_API_URL"
-        type = "plain_text"
-        text = var.rootkey_api_url
-      },
-      {
-        name = "MAX_FILE_SIZE_BYTES"
-        type = "plain_text"
-        text = tostring(var.max_file_size_bytes)
-      },
-    ],
-  )
-
-  tags = var.tags
-}
-
-# Connector API Key — held as a Workers Secret (encrypted at rest, never visible
-# in plaintext through the dashboard or API after creation).
-resource "cloudflare_workers_secret" "rootkey_api_key" {
-  account_id  = var.cloudflare_account_id
-  script_name = cloudflare_workers_script.connector.script_name
-  name        = "ROOTKEY_API_KEY"
-  secret_text = var.rootkey_api_key
+  bindings = [
+    {
+      name        = "BUCKET"
+      type        = "r2_bucket"
+      bucket_name = var.bucket_name
+    },
+    {
+      name = "ROOTKEY_API_URL"
+      type = "plain_text"
+      text = var.rootkey_api_url
+    },
+    {
+      name = "MAX_FILE_SIZE_BYTES"
+      type = "plain_text"
+      text = tostring(var.max_file_size_bytes)
+    },
+    # Connector API Key. Provider v5 removed the standalone
+    # `cloudflare_workers_secret` resource; a `secret_text` binding is its
+    # replacement and is what the old resource compiled down to anyway. The
+    # Worker still reads it as a plain string from `env.ROOTKEY_API_KEY`, so
+    # worker/src is unchanged.
+    #
+    # Cloudflare encrypts it at rest and it cannot be read back through the
+    # dashboard or API — but unlike the other three connectors, the value DOES
+    # land in terraform.tfstate, because no Cloudflare v5 resource implements a
+    # write-only argument. See README.md → "Secrets and Terraform state".
+    {
+      name = "ROOTKEY_API_KEY"
+      type = "secret_text"
+      text = var.rootkey_api_key
+    },
+  ]
 }
 
 # ─── Queue → Worker wiring ─────────────────────────────────────────────────────
 
 resource "cloudflare_queue_consumer" "events" {
-  account_id = var.cloudflare_account_id
-  queue_id   = cloudflare_queue.events.id
-  type       = "worker"
+  account_id  = var.cloudflare_account_id
+  queue_id    = cloudflare_queue.events.id
+  type        = "worker"
   script_name = cloudflare_workers_script.connector.script_name
 
+  # `dead_letter_queue` is a top-level argument on this resource, NOT a member
+  # of `settings`. It used to be nested here, which meant the DLQ was never
+  # actually wired up: messages exhausting max_retries were dropped instead of
+  # landing in the DLQ the module creates.
+  dead_letter_queue = cloudflare_queue.dlq.queue_name
+
   settings = {
-    batch_size        = 25
-    max_retries       = 5
-    max_wait_time_ms  = 5000
-    dead_letter_queue = cloudflare_queue.dlq.queue_name
+    batch_size       = 25
+    max_retries      = 5
+    max_wait_time_ms = 5000
   }
 }
 
@@ -144,8 +167,10 @@ resource "cloudflare_r2_bucket_event_notification" "rootkey" {
     },
   ]
 
+  # The secret is now a binding on the Worker script itself, so the former
+  # explicit dependency on `cloudflare_workers_secret` is covered by the
+  # consumer's reference to the script.
   depends_on = [
     cloudflare_queue_consumer.events,
-    cloudflare_workers_secret.rootkey_api_key,
   ]
 }

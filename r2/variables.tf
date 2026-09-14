@@ -31,7 +31,7 @@ variable "name_suffix" {
 variable "rootkey_api_key" {
   type        = string
   sensitive   = true
-  description = "Connector API Key from the ROOTKey dashboard. Stored as a Cloudflare Workers Secret; the Worker reads it from `env.ROOTKEY_API_KEY` at runtime."
+  description = "Connector API Key from the ROOTKey dashboard. Delivered to the Worker as a `secret_text` binding, which the Worker reads from `env.ROOTKEY_API_KEY` at runtime. NOTE: unlike the sharepoint/onedrive/aws-s3 connectors, this value IS persisted to terraform.tfstate — the Cloudflare provider implements no write-only argument to avoid it. See README.md -> \"Secrets and Terraform state\"."
 
   validation {
     condition     = length(var.rootkey_api_key) > 0
@@ -65,10 +65,4 @@ variable "max_file_size_bytes" {
     condition     = var.max_file_size_bytes > 0 && var.max_file_size_bytes <= 5368709120
     error_message = "max_file_size_bytes must be between 1 and 5368709120 (5 GiB). Above ~500 MiB you may also need to upgrade the Workers plan to keep CPU/memory headroom."
   }
-}
-
-variable "tags" {
-  type        = map(string)
-  default     = {}
-  description = "Tags applied to the Worker script. Note: Cloudflare Queues and R2 event notifications do not currently support tags through the API, so these only land on the Worker."
 }

@@ -23,7 +23,10 @@ output "dlq_queue_name" {
   value       = cloudflare_queue.dlq.queue_name
 }
 
-output "r2_event_notification_id" {
-  description = "ID of the R2 event-notification binding that routes object-created events to the queue."
-  value       = cloudflare_r2_bucket_event_notification.rootkey.id
+# Renamed from `r2_event_notification_id` during the provider v5 migration:
+# cloudflare_r2_bucket_event_notification exports no `id` attribute in v5, and
+# the notification is addressed by the bucket it is attached to instead.
+output "r2_event_notification_bucket" {
+  description = "Bucket the R2 event-notification binding is attached to — the binding that routes object-created events to the queue."
+  value       = cloudflare_r2_bucket_event_notification.rootkey.bucket_name
 }
