@@ -23,3 +23,10 @@ crash.*.log
 # build artifact.
 *.tfplan
 tfplan
+
+# Internal working material that must never ship to a customer. The public
+# documentation lives in the separate ROOT-Key/docs repository, so a docs/
+# folder here is scratch by definition — today it holds BACKEND_CONTRACT_v2.md,
+# ROOTKey's internal backend API contract. It is untracked, and on a public
+# repository "untracked" is one absent-minded `git add .` away from published.
+/docs/
