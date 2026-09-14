@@ -21,9 +21,9 @@ compatibility_date = "2024-12-01"
 # max_retries          = 5
 # dead_letter_queue    = "rootkey-r2-dlq"
 
-# === Secrets (set via Terraform cloudflare_workers_secret, NEVER committed) ===
+# === Secrets (set as a `secret_text` binding by Terraform, NEVER committed) ===
 # ROOTKEY_API_KEY      — Connector API Key from the ROOTKey dashboard
 #
-# === Plain env vars (set via Terraform cloudflare_workers_script.plain_text_binding) ===
+# === Plain env vars (set as `plain_text` bindings by Terraform) ===
 # ROOTKEY_API_URL      — default https://api.rootkey.ai
 # MAX_FILE_SIZE_BYTES  — default 524288000 (500 MiB)
