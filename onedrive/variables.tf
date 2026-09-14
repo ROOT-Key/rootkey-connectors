@@ -51,11 +51,23 @@ variable "graph_client_id" {
 variable "graph_client_secret" {
   type        = string
   sensitive   = true
-  description = "Client secret value generated for the App Registration. Stored in Azure Key Vault; the Function App resolves it at startup via Key Vault references."
+  ephemeral   = true
+  description = "Client secret value generated for the App Registration. Written to Azure Key Vault; the Function App resolves it at startup via Key Vault references. Marked ephemeral and written with a write-only argument, so the value is never persisted to terraform.tfstate nor to a saved plan file. When you rotate it, you must also increment graph_client_secret_version."
 
   validation {
     condition     = length(var.graph_client_secret) > 0
     error_message = "graph_client_secret must not be empty."
+  }
+}
+
+variable "graph_client_secret_version" {
+  type        = number
+  default     = 1
+  description = "Rotation counter for graph_client_secret. Increment it every time graph_client_secret changes. Because graph_client_secret is written as a write-only argument, Terraform never sees its value and therefore cannot detect that it changed — this counter is the only signal that the secret must be re-written to Key Vault. Change the secret without incrementing this and the new value is silently ignored."
+
+  validation {
+    condition     = var.graph_client_secret_version >= 1
+    error_message = "graph_client_secret_version must be >= 1."
   }
 }
 
@@ -72,11 +84,23 @@ variable "drive_id" {
 variable "rootkey_api_key" {
   type        = string
   sensitive   = true
-  description = "Connector API Key from the ROOTKey dashboard. Stored in Azure Key Vault; the Function App resolves it at startup via Key Vault references."
+  ephemeral   = true
+  description = "Connector API Key from the ROOTKey dashboard. Written to Azure Key Vault; the Function App resolves it at startup via Key Vault references. Marked ephemeral and written with a write-only argument, so the value is never persisted to terraform.tfstate nor to a saved plan file. When you rotate it, you must also increment rootkey_api_key_version."
 
   validation {
     condition     = length(var.rootkey_api_key) > 0
     error_message = "rootkey_api_key must not be empty."
+  }
+}
+
+variable "rootkey_api_key_version" {
+  type        = number
+  default     = 1
+  description = "Rotation counter for rootkey_api_key. Increment it every time rootkey_api_key changes. Because rootkey_api_key is written as a write-only argument, Terraform never sees its value and therefore cannot detect that it changed — this counter is the only signal that the secret must be re-written to Key Vault. Change the secret without incrementing this and the new value is silently ignored."
+
+  validation {
+    condition     = var.rootkey_api_key_version >= 1
+    error_message = "rootkey_api_key_version must be >= 1."
   }
 }
 

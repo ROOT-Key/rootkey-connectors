@@ -19,6 +19,45 @@ Deploys a serverless integration into your AWS account. An EventBridge rule list
 
 The module does **not** touch your S3 bucket's notification configuration. That stays under your control.
 
+## Secrets and Terraform state
+
+Terraform records the attributes of everything it manages in a state file. By default that includes the *value* of any secret you pass in — marking a variable `sensitive` only masks it in CLI output, it does not keep it off disk. For a regulated environment that is usually the first question asked about an IaC module, so it is worth being precise about what this one does.
+
+**The secrets you supply are never written to state.** `rootkey_api_key` is written with `secret_string_wo` — a write-only argument. The provider receives the value, sends it to Secrets Manager, and Terraform persists nothing. The same value is also absent from a saved plan file (`terraform plan -out=…`), because the corresponding input variables are declared `ephemeral`.
+
+You can verify this yourself after an apply — the following returns nothing:
+
+```bash
+grep -i -c "<the secret value>" terraform.tfstate
+```
+
+**The cost of this: Terraform cannot detect that a secret changed.** It never sees the value, so it has nothing to compare against. That is what the `*_version` counters are for. Change a secret *and* increment its counter, and the new value is written. Change a secret and leave the counter alone, and **the apply succeeds while silently doing nothing** — this is the one sharp edge of the design, and it is why the rotation procedures below always name both steps.
+
+**What does still live in the state file.** Being complete about this matters more than the headline:
+
+| What | Why it is there |
+|---|---|
+| Resource ARNs, names, IAM policy documents | Infrastructure metadata. The Lambda's `environment` block holds the secret's **ARN**, never its value — the Lambda reads the value from Secrets Manager at cold start using its execution role. |
+| CloudWatch log group and SQS queue names | Infrastructure metadata. |
+
+None of these is a credential to your tenant, but list them anyway if you are producing an inventory for an audit.
+
+**Where to keep the state file.** Even with no secrets in it, the state is an accurate map of your deployment and should not sit on an operator's laptop. Use a remote backend in your own cloud account — it also gives you state locking, so two people cannot apply at once:
+
+```hcl
+terraform {
+  backend "s3" {
+    bucket       = "my-tfstate-bucket"
+    key          = "rootkey-connector.tfstate"
+    region       = "eu-west-1"
+    encrypt      = true
+    use_lockfile = true # S3-native state locking
+  }
+}
+```
+
+The trust boundary here is the same one you already accepted by letting the module create a Secrets Manager in your own subscription. If that is acceptable, the state is acceptable in the same place.
+
 ## Prerequisites
 
 ### 1. EventBridge notifications enabled on the bucket
@@ -61,7 +100,7 @@ The Terraform principal applying this module needs `iam:PutRolePolicy` on the ro
 
 ### 3. Tooling
 
-- [Terraform](https://developer.hashicorp.com/terraform/install) v1.3 or later.
+- [Terraform](https://developer.hashicorp.com/terraform/install) **v1.11 or later**. This is a hard floor, not a recommendation: the module uses write-only arguments to keep your secrets out of the Terraform state file, and those require 1.11. Older versions fail at `terraform init` with an explicit version error rather than silently writing the secret to disk.
 - [Node.js](https://nodejs.org) 22+ on the machine running Terraform (used to compile the Lambda at `terraform apply` time).
 
 ## Setup
@@ -82,12 +121,20 @@ Paste the pre-filled block from the ROOTKey dashboard into a `.tf` file, or conf
 
 ```hcl
 module "rootkey_s3_connector" {
-  source = "github.com/rootkey-ai/rootkey-connectors//aws-s3"
+  # Pin to a release tag. Without a ?ref= the source resolves to whatever is on
+  # the default branch at the moment you run terraform init, which means two
+  # people deploying a week apart can get different code — not acceptable
+  # under most change-control regimes.
+  source = "github.com/ROOT-Key/rootkey-connectors//aws-s3?ref=v1.0.0"
 
   bucket_name     = "my-company-documents"
   aws_region      = "eu-west-1"
   iam_role_arn    = "arn:aws:iam::123456789012:role/rootkey-lambda-role"
   rootkey_api_key = "rk_conn_xxxxxxxxxxxxxxxxxxxx"
+
+  # Increment whenever you change rootkey_api_key above — see
+  # "Secrets and Terraform state" below for why.
+  rootkey_api_key_version = 1
 
   # Optional
   prefix              = "uploads/"             # monitor only a prefix; omit for the entire bucket
@@ -108,7 +155,8 @@ module "rootkey_s3_connector" {
 | `bucket_name` | string | yes | — | S3 bucket to monitor (EventBridge must be enabled on it). |
 | `aws_region` | string | yes | — | AWS region of the bucket. |
 | `iam_role_arn` | string | yes | — | ARN of the pre-existing IAM Role the Lambda will assume. The module attaches an inline policy to it. |
-| `rootkey_api_key` | string | yes | — | Connector API Key from the ROOTKey dashboard. Stored in Secrets Manager. |
+| `rootkey_api_key` | string | yes | — | Connector API Key from the ROOTKey dashboard. Written to Secrets Manager as a write-only argument — never persisted to Terraform state or to a saved plan. |
+| `rootkey_api_key_version` | number | no | `1` | Rotation counter. **Must be incremented whenever `rootkey_api_key` changes**, or the new value is silently ignored. |
 | `prefix` | string | no | `""` | S3 key prefix filter; leave empty to monitor the entire bucket. |
 | `rootkey_api_url` | string | no | `"https://api.rootkey.ai"` | ROOTKey API base URL. Must use `https://`. |
 | `max_file_size_bytes` | number | no | `524288000` (500 MiB) | Objects larger than this are skipped with an error. Raise only after increasing Lambda memory_size. |
@@ -147,6 +195,10 @@ If nothing arrives:
 1. Confirm EventBridge is enabled on the bucket (Properties → Event notifications).
 2. Check the DLQ — `terraform output dlq_url`.
 3. Tail the Lambda logs — `aws logs tail $(terraform output -raw log_group_name) --follow`.
+
+## Operational notes
+
+- **Rotating the ROOTKey API key.** Delete the connector in the dashboard and create a new one (reuse the same bucket and role), then update **both** `rootkey_api_key` **and** `rootkey_api_key_version` (increment it), then `terraform apply`. Updating the key without incrementing the counter produces a successful apply that changes nothing — Terraform cannot see a write-only value, so the counter is its only signal. The Lambda reads the secret at cold start, so allow for warm containers still holding the old value for a few minutes, or force a new version to cycle them.
 
 ## License
 

@@ -31,11 +31,23 @@ variable "iam_role_arn" {
 variable "rootkey_api_key" {
   type        = string
   sensitive   = true
-  description = "Connector API Key from the ROOTKey dashboard. Stored in AWS Secrets Manager; the Lambda reads it at cold start."
+  ephemeral   = true
+  description = "Connector API Key from the ROOTKey dashboard. Written to AWS Secrets Manager; the Lambda reads it at cold start. Marked ephemeral and written with a write-only argument, so the value is never persisted to terraform.tfstate nor to a saved plan file. When you rotate it, you must also increment rootkey_api_key_version."
 
   validation {
     condition     = length(var.rootkey_api_key) > 0
     error_message = "rootkey_api_key must not be empty."
+  }
+}
+
+variable "rootkey_api_key_version" {
+  type        = number
+  default     = 1
+  description = "Rotation counter for rootkey_api_key. Increment it every time rootkey_api_key changes. Because rootkey_api_key is written as a write-only argument, Terraform never sees its value and therefore cannot detect that it changed — this counter is the only signal that the secret must be re-written to Secrets Manager. Change the secret without incrementing this and the new value is silently ignored."
+
+  validation {
+    condition     = var.rootkey_api_key_version >= 1
+    error_message = "rootkey_api_key_version must be >= 1."
   }
 }
 
