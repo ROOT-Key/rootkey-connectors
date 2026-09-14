@@ -1,0 +1,32 @@
+# Terraform variable files. These are where a secret is most likely to be typed
+# by hand — terraform.tfvars is the default filename Terraform auto-loads, and
+# it is the natural place to paste a Graph client secret or a ROOTKey API key
+# while testing. This repository is public, so a single careless `git add .`
+# would publish them. Ignored everywhere, including in the connector subfolders.
+#
+# The .tfvars.example convention is explicitly allowed through, for documented
+# templates that contain placeholders only.
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+
+# Terraform state. Also covered by each connector's own .gitignore; repeated
+# here so a state file written anywhere in the tree is caught.
+*.tfstate
+*.tfstate.*
+.terraform/
+crash.log
+crash.*.log
+
+# Saved plan files. A saved plan embeds the values of the root module's input
+# variables, so it is as sensitive as a state file even though it looks like a
+# build artifact.
+*.tfplan
+tfplan
+
+# Internal working material that must never ship to a customer. The public
+# documentation lives in the separate ROOT-Key/docs repository, so a docs/
+# folder here is scratch by definition — today it holds BACKEND_CONTRACT_v2.md,
+# ROOTKey's internal backend API contract. It is untracked, and on a public
+# repository "untracked" is one absent-minded `git add .` away from published.
+/docs/

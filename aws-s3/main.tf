@@ -1,9 +1,16 @@
 terraform {
-  required_version = ">= 1.3"
+  # 1.11 is the floor for write-only arguments. They are what keeps the
+  # customer-supplied secrets out of terraform.tfstate and out of any saved
+  # plan file. `ephemeral` input variables alone would only need 1.10, but the
+  # two mechanisms are only useful together: ephemeral keeps the value out of
+  # the plan, write-only keeps it out of the state.
+  required_version = ">= 1.11"
   required_providers {
     aws = {
-      source  = "hashicorp/aws"
-      version = "~> 5.0"
+      source = "hashicorp/aws"
+      # Floor verified to expose secret_string_wo / secret_string_wo_version
+      # on aws_secretsmanager_secret_version. Do not loosen to "~> 5.0".
+      version = ">= 5.100.0, < 6.0.0"
     }
     null = {
       source  = "hashicorp/null"
@@ -71,9 +78,15 @@ resource "aws_secretsmanager_secret" "api_key" {
   tags        = local.common_tags
 }
 
+# `secret_string_wo` is a write-only argument: the value reaches Secrets
+# Manager but is never persisted to terraform.tfstate or to a saved plan file.
+# Terraform cannot see a write-only value, so it cannot detect a change to it —
+# bump `rootkey_api_key_version` when the key rotates, or the new value is
+# silently ignored.
 resource "aws_secretsmanager_secret_version" "api_key" {
-  secret_id     = aws_secretsmanager_secret.api_key.id
-  secret_string = var.rootkey_api_key
+  secret_id                = aws_secretsmanager_secret.api_key.id
+  secret_string_wo         = var.rootkey_api_key
+  secret_string_wo_version = var.rootkey_api_key_version
 }
 
 # ─── CloudWatch log group (managed retention) ──────────────────────────────────

@@ -83,6 +83,48 @@ The module ships with a defensive default posture; a few choices have intentiona
 - **HTTPS-only, TLS 1.2 minimum, FTPS disabled, HTTP/2 enabled** on the Function App.
 - **Storage Account shared access keys are disabled** (`shared_access_key_enabled = false`). All access — the Function App's deployment bundle, its own state blobs, and the DLQ queue — flows through the user-assigned managed identity with RBAC (Storage Blob Data Owner + Storage Queue Data Contributor). Identity-based `AzureWebJobsStorage` is wired via `AzureWebJobsStorage__accountName`. This is one of the reasons the module runs on Flex Consumption; the older Linux Consumption (Y1) plan required the legacy connection string and could not turn keys off.
 
+## Secrets and Terraform state
+
+Terraform records the attributes of everything it manages in a state file. By default that includes the *value* of any secret you pass in — marking a variable `sensitive` only masks it in CLI output, it does not keep it off disk. For a regulated environment that is usually the first question asked about an IaC module, so it is worth being precise about what this one does.
+
+**The secrets you supply are never written to state.** Both `graph_client_secret` and `rootkey_api_key` are written with `value_wo` — a write-only argument. The provider receives the value, sends it to Key Vault, and Terraform persists nothing. The same value is also absent from a saved plan file (`terraform plan -out=…`), because the corresponding input variables are declared `ephemeral`.
+
+You can verify this yourself after an apply — the following returns nothing:
+
+```bash
+grep -i -c "<the secret value>" terraform.tfstate
+```
+
+**The cost of this: Terraform cannot detect that a secret changed.** It never sees the value, so it has nothing to compare against. That is what the `*_version` counters are for. Change a secret *and* increment its counter, and the new value is written. Change a secret and leave the counter alone, and **the apply succeeds while silently doing nothing** — this is the one sharp edge of the design, and it is why the rotation procedures below always name both steps.
+
+**What does still live in the state file.** Being complete about this matters more than the headline:
+
+| What | Why it is there |
+|---|---|
+| `random_string.client_state.result` | The webhook `clientState` — a validation token this module generates so the Function App can reject forged Graph notifications. It is not a credential to your tenant. It stays in state because it must be stable across applies; regenerating it on every apply would invalidate in-flight notifications. |
+| `azurerm_application_insights.ai.connection_string` | Contains the Application Insights instrumentation key. Grants telemetry ingestion, nothing else. |
+| Resource IDs, names, RBAC assignments, app settings | Infrastructure metadata. Note that `app_settings` holds Key Vault *references* (`@Microsoft.KeyVault(SecretUri=…)`), never resolved secret values. |
+
+Storage Account access keys are **not** present: the module sets `shared_access_key_enabled = false`, so there are none to record.
+
+None of these is a credential to your tenant, but list them anyway if you are producing an inventory for an audit.
+
+**Where to keep the state file.** Even with no secrets in it, the state is an accurate map of your deployment and should not sit on an operator's laptop. Use a remote backend in your own cloud account — it also gives you state locking, so two people cannot apply at once:
+
+```hcl
+terraform {
+  backend "azurerm" {
+    resource_group_name  = "my-tfstate-rg"
+    storage_account_name = "mytfstate"
+    container_name       = "tfstate"
+    key                  = "rootkey-connector.tfstate"
+    use_azuread_auth     = true # no storage account keys
+  }
+}
+```
+
+The trust boundary here is the same one you already accepted by letting the module create a Key Vault in your own subscription. If that is acceptable, the state is acceptable in the same place.
+
 ## Prerequisites
 
 ### 1. An Azure Entra ID App Registration
@@ -121,7 +163,7 @@ The hostname must end with `.sharepoint.com`.
 
 ### 4. Tooling
 
-- [Terraform](https://developer.hashicorp.com/terraform/install) v1.3 or later.
+- [Terraform](https://developer.hashicorp.com/terraform/install) **v1.11 or later**. This is a hard floor, not a recommendation: the module uses write-only arguments to keep your secrets out of the Terraform state file, and those require 1.11. Older versions fail at `terraform init` with an explicit version error rather than silently writing the secret to disk.
 - [Node.js](https://nodejs.org) 22+ on the machine running Terraform (used to compile the function at `terraform apply` time).
 - Azure CLI authenticated (`az login`) or service principal credentials in the environment.
 
@@ -154,7 +196,11 @@ You should see `subscriptions.json` and one `delta-{driveId}.txt` per drive afte
 
 ```hcl
 module "rootkey_sharepoint_connector" {
-  source = "github.com/rootkey-ai/rootkey-connectors//sharepoint"
+  # Pin to a release tag. Without a ?ref= the source resolves to whatever is on
+  # the default branch at the moment you run terraform init, which means two
+  # people deploying a week apart can get different code — not acceptable
+  # under most change-control regimes.
+  source = "github.com/ROOT-Key/rootkey-connectors//sharepoint?ref=v1.0.0"
 
   resource_group_name = "rootkey-connectors"
   azure_location      = "westeurope"
@@ -163,6 +209,11 @@ module "rootkey_sharepoint_connector" {
   graph_tenant_id     = "11111111-1111-1111-1111-111111111111"
   graph_client_id     = "22222222-2222-2222-2222-222222222222"
   graph_client_secret = "Xyz~RandomSecretFromAppRegistration"
+
+  # Rotation counters. Increment the matching counter whenever you change a
+  # secret above — see "Secrets and Terraform state" below for why.
+  graph_client_secret_version = 1
+  rootkey_api_key_version     = 1
   site_url            = "https://contoso.sharepoint.com/sites/legal"
 
   rootkey_api_key = "rk_conn_xxxxxxxxxxxxxxxxxxxx"
@@ -188,9 +239,11 @@ module "rootkey_sharepoint_connector" {
 | `name_suffix` | string | yes | — | 3–12 lowercase alphanumeric chars used to make resource names unique. |
 | `graph_tenant_id` | string | yes | — | Tenant ID (UUID) of the Microsoft 365 tenant. |
 | `graph_client_id` | string | yes | — | App Registration Application (client) ID (UUID). |
-| `graph_client_secret` | string | yes | — | App Registration client secret. Stored in Key Vault. |
+| `graph_client_secret` | string | yes | — | App Registration client secret. Written to Key Vault as a write-only argument — never persisted to Terraform state or to a saved plan. |
+| `graph_client_secret_version` | number | no | `1` | Rotation counter. **Must be incremented whenever `graph_client_secret` changes**, or the new value is silently ignored. |
 | `site_url` | string | yes | — | Full URL of the SharePoint site (must end with `.sharepoint.com`). |
-| `rootkey_api_key` | string | yes | — | Connector API Key from the ROOTKey dashboard. Stored in Key Vault. |
+| `rootkey_api_key` | string | yes | — | Connector API Key from the ROOTKey dashboard. Written to Key Vault as a write-only argument — never persisted to Terraform state or to a saved plan. |
+| `rootkey_api_key_version` | number | no | `1` | Rotation counter. **Must be incremented whenever `rootkey_api_key` changes**, or the new value is silently ignored. |
 | `rootkey_api_url` | string | no | `"https://api.rootkey.ai"` | ROOTKey API base URL. Must use `https://`. |
 | `max_file_size_bytes` | number | no | `524288000` (500 MiB) | Files larger than this are skipped and sent to the DLQ. |
 | `log_retention_days` | number | no | `30` | Application Insights / Log Analytics retention (30–730). |
@@ -291,8 +344,10 @@ If nothing arrives:
 
 ## Operational notes
 
-- **Rotating the Graph client secret:** generate a new secret in the App Registration, update `graph_client_secret`, `terraform apply`. The new value goes into Key Vault; restart the Function App to force pickup (otherwise the cached OAuth token is used for up to 1h).
-- **Rotating the ROOTKey API key:** delete the connector in the dashboard and create a new one (reuse the App Registration and Site URL), update `rootkey_api_key`, `terraform apply`.
+- **Rotating the Graph client secret.** Generate the new secret in the App Registration, then update **both** `graph_client_secret` **and** `graph_client_secret_version` (increment it), then `terraform apply`. Updating the secret without incrementing the counter produces a successful apply that changes nothing — Terraform cannot see a write-only value, so the counter is its only signal. Apply first and revoke the old secret in Entra afterwards, once the connector is confirmed healthy; the Function App may hold a cached OAuth token for up to 1h, so allow for that overlap.
+
+  Do **not** rotate by writing a new version straight into Key Vault with `az keyvault secret set`. The Function App resolves a *versioned* Key Vault reference, so it would keep reading the old version — which you just revoked — and start failing with `401 invalid_client` (AADSTS7000215). Rotation has to go through `terraform apply`, which is what moves the app setting to the new version URI.
+- **Rotating the ROOTKey API key.** Delete the connector in the dashboard and create a new one (reuse the App Registration and Site URL), then update **both** `rootkey_api_key` **and** `rootkey_api_key_version` (increment it), then `terraform apply`. The same caveats apply.
 - **Adding a drive to the site:** automatic — the next 12h timer cycle (or the next deploy) picks it up and creates a subscription.
 - **Removing a drive from the site:** automatic — the timer detects the missing drive, deletes its subscription via Graph, and removes its delta cursor blob.
 - **Multiple sites:** deploy the module once per site. Each instance is fully isolated, namespaced by `name_suffix` and a hash of the site URL.

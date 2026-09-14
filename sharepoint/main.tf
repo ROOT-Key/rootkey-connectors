@@ -1,9 +1,16 @@
 terraform {
-  required_version = ">= 1.3"
+  # 1.11 is the floor for write-only arguments. They are what keeps the
+  # customer-supplied secrets out of terraform.tfstate and out of any saved
+  # plan file. `ephemeral` input variables alone would only need 1.10, but the
+  # two mechanisms are only useful together: ephemeral keeps the value out of
+  # the plan, write-only keeps it out of the state.
+  required_version = ">= 1.11"
   required_providers {
     azurerm = {
-      source  = "hashicorp/azurerm"
-      version = "~> 4.0"
+      source = "hashicorp/azurerm"
+      # Floor verified to expose value_wo / value_wo_version on
+      # azurerm_key_vault_secret. Do not loosen to "~> 4.0".
+      version = ">= 4.79.0, < 5.0.0"
     }
     random = {
       source  = "hashicorp/random"
@@ -204,22 +211,43 @@ resource "azurerm_role_assignment" "kv_admin_terraform" {
   principal_id         = data.azurerm_client_config.current.object_id
 }
 
+# The two customer-supplied secrets are written with `value_wo`, a write-only
+# argument: the provider receives the value, sends it to Key Vault, and
+# Terraform persists nothing. It appears in neither terraform.tfstate nor a
+# saved plan file.
+#
+# The trade-off is that Terraform cannot see a write-only value, so it cannot
+# detect that the secret changed. `value_wo_version` is the explicit signal:
+# bump it and the secret is re-written to Key Vault as a new version, which
+# changes the resource ID, which changes the versioned Key Vault reference in
+# app_settings, which makes the Function App pick the new value up. Change the
+# secret without bumping the counter and the new value is silently ignored.
 resource "azurerm_key_vault_secret" "graph_client_secret" {
-  name         = "graph-client-secret"
-  value        = var.graph_client_secret
-  key_vault_id = azurerm_key_vault.kv.id
+  name             = "graph-client-secret"
+  value_wo         = var.graph_client_secret
+  value_wo_version = var.graph_client_secret_version
+  key_vault_id     = azurerm_key_vault.kv.id
 
   depends_on = [azurerm_role_assignment.kv_admin_terraform]
 }
 
 resource "azurerm_key_vault_secret" "rootkey_api_key" {
-  name         = "rootkey-api-key"
-  value        = var.rootkey_api_key
-  key_vault_id = azurerm_key_vault.kv.id
+  name             = "rootkey-api-key"
+  value_wo         = var.rootkey_api_key
+  value_wo_version = var.rootkey_api_key_version
+  key_vault_id     = azurerm_key_vault.kv.id
 
   depends_on = [azurerm_role_assignment.kv_admin_terraform]
 }
 
+# Deliberately NOT write-only. The value comes from random_string, whose
+# `result` is persisted in state no matter what this resource does, so
+# value_wo would remove nothing. Making it ephemeral would regenerate the
+# clientState on every apply and invalidate in-flight Graph notifications
+# until the next reconciliation — a real availability cost for no real gain,
+# since this is a webhook validation token we generate, not a credential to
+# the customer tenant. Called out in the README so it is not a surprise in an
+# audit.
 resource "azurerm_key_vault_secret" "webhook_client_state" {
   name         = "webhook-client-state"
   value        = random_string.client_state.result
@@ -295,9 +323,9 @@ resource "azurerm_function_app_flex_consumption" "func" {
   # Deployment package source: Flex Consumption pulls the zip directly from a
   # blob container, watching for new blobs. We upload the zip via
   # azurerm_storage_blob.deployment_package above.
-  storage_container_type      = "blobContainer"
-  storage_container_endpoint  = local.deployment_package_endpoint
-  storage_authentication_type = "UserAssignedIdentity"
+  storage_container_type            = "blobContainer"
+  storage_container_endpoint        = local.deployment_package_endpoint
+  storage_authentication_type       = "UserAssignedIdentity"
   storage_user_assigned_identity_id = azurerm_user_assigned_identity.func.id
 
   # Node.js v4 programming model is first-class on Flex — no EnableWorkerIndexing

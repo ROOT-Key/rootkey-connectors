@@ -80,7 +80,11 @@ terraform apply
 
 ```hcl
 module "rootkey_r2_connector" {
-  source = "github.com/rootkey-ai/rootkey-connectors//r2"
+  # Pin to a release tag. Without a ?ref= the source resolves to whatever is on
+  # the default branch at the moment you run terraform init, which means two
+  # people deploying a week apart can get different code — not acceptable
+  # under most change-control regimes.
+  source = "github.com/ROOT-Key/rootkey-connectors//r2?ref=v1.0.0"
 
   cloudflare_account_id = "00112233445566778899aabbccddeeff"
   bucket_name           = "my-company-documents"
