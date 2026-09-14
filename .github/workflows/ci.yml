@@ -84,3 +84,47 @@ jobs:
 
       - name: Build
         run: npm run build
+
+  modules:
+    name: "${{ matrix.connector }} — terraform fmt / validate"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        connector: [aws-s3, onedrive, r2, sharepoint]
+
+    defaults:
+      run:
+        working-directory: ${{ matrix.connector }}
+
+    steps:
+      - uses: actions/checkout@v4
+        # TODO: pin to SHA — see note on the functions job above.
+
+      - uses: hashicorp/setup-terraform@v3
+        # TODO: pin to SHA — https://github.com/hashicorp/setup-terraform/releases
+        with:
+          # Must be >= 1.11: the modules use write-only arguments to keep
+          # customer secrets out of state. An older Terraform cannot parse them.
+          terraform_version: 1.11.0
+          terraform_wrapper: false
+
+      - name: Format check
+        run: terraform fmt -check -diff -recursive .
+
+      # -backend=false: we are validating module syntax against real provider
+      # schemas, not connecting to any state. No cloud credentials are needed
+      # and none are configured for this job.
+      - name: Init (providers only)
+        run: terraform init -backend=false -input=false
+
+      # This is the step that catches provider drift. A module can sit valid for
+      # months and then break because a provider major/minor removed or renamed
+      # a resource, while the version constraint still happily resolves it. That
+      # failure would otherwise surface for the first time in a customer's
+      # terminal, mid-deployment.
+      - name: Validate
+        run: terraform validate
