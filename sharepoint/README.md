@@ -28,7 +28,7 @@ The module **does not** create or modify the Azure Entra ID App Registration —
 The Function App runs **three** registered functions:
 
 1. **`notification`** (HTTP POST `/api/notification`) — receives Graph webhook notifications for any of the site's drives. Validates the `clientState`, maps each notification's `subscriptionId` to the originating drive via the stored `subscriptions.json`, acquires a per-drive sync lease (so concurrent invocations for the same drive serialize), and runs the delta query loop.
-2. **`renewSubscription`** (Timer every **1 hour** **with `runOnStartup: true`**) — acquires a **global reconciliation lease**, re-resolves the site, lists all current drives, renews existing subscriptions, creates subscriptions for newly-added drives, deletes subscriptions for removed drives, and runs a safety-net delta sync for each drive. The 1-hour cadence caps the worst-case latency between an edit in SharePoint and ingestion into ROOTKey to (Graph webhook delay) OR (time to next hour), whichever comes first. The `runOnStartup` flag guarantees that the connector starts working within seconds of `terraform apply` finishing.
+2. **`renewSubscription`** (Timer every **1 hour** **with `runOnStartup: true`**) — acquires a **global reconciliation lease**, re-resolves the site, lists all current drives, renews existing subscriptions, creates subscriptions for newly-added drives, deletes subscriptions for removed drives, and runs a safety-net delta sync for each drive. The 1-hour cadence caps the worst-case latency between an edit in SharePoint and ingestion into ROOTKey to (Graph webhook delay) OR (time to next hour), whichever comes first. The `runOnStartup` flag makes the connector reconcile as soon as the timer's instance group starts. On Flex Consumption that group is not provisioned the instant the app is created — allow 20–30 minutes after `terraform apply` before the first reconciliation; see step 5 of Setup.
 3. **`dlqReplay`** (Storage Queue trigger on `rootkey-dlq`) — automatically reprocesses every DLQ message: re-fetches the item from Graph (it may have changed or been deleted), and runs the same upload pipeline. Permanent errors (oversize, 4xx) are caught and short-circuited with a stable log marker; transient errors propagate so the queue retries with backoff up to 5 times before moving the message to the `rootkey-dlq-poison` queue.
 
 ## What the connector sends to ROOTKey
@@ -99,15 +99,34 @@ grep -i -c "<the secret value>" terraform.tfstate
 
 **What does still live in the state file.** Being complete about this matters more than the headline:
 
-| What | Why it is there |
-|---|---|
-| `random_string.client_state.result` | The webhook `clientState` — a validation token this module generates so the Function App can reject forged Graph notifications. It is not a credential to your tenant. It stays in state because it must be stable across applies; regenerating it on every apply would invalidate in-flight notifications. |
-| `azurerm_application_insights.ai.connection_string` | Contains the Application Insights instrumentation key. Grants telemetry ingestion, nothing else. |
-| Resource IDs, names, RBAC assignments, app settings | Infrastructure metadata. Note that `app_settings` holds Key Vault *references* (`@Microsoft.KeyVault(SecretUri=…)`), never resolved secret values. |
+This list was produced by walking the Terraform provider schema for every resource the module creates, taking each attribute marked `sensitive`, and checking it against a real applied state. It is not written from memory, and you can reproduce it yourself — see the command below.
 
-Storage Account access keys are **not** present: the module sets `shared_access_key_enabled = false`, so there are none to record.
+| What | Usable? | Why it is there |
+|---|---|---|
+| `azurerm_storage_account` — `primary_access_key`, `secondary_access_key`, and the three connection strings that embed them | **No** | Azure generates account keys whether or not you use them. The module sets `shared_access_key_enabled = false`, which stops them authenticating: an attempt returns `Key based authentication is not permitted on this storage account`. They are recorded in state regardless, so an auditor will find them — they are inert, not absent. |
+| `azurerm_function_app_flex_consumption` — `site_credential[0].password` | **Yes** | The SCM/Kudu publishing password. Basic publishing authentication is enabled by default, so this credential grants deployment access to the Function App. This is the most significant item in the list; see the note below it. |
+| `azurerm_log_analytics_workspace` — `primary_shared_key`, `secondary_shared_key` | **Yes** | Allow writing data into the Log Analytics workspace. Ingestion only — they grant no read access and reach nothing else. |
+| `azurerm_application_insights` — `instrumentation_key`, `connection_string` | **Yes** | Telemetry ingestion into this connector's Application Insights, and nothing else. |
+| `random_string.client_state.result` | n/a | The webhook `clientState` — a validation token the module generates so the Function App can reject forged Graph notifications. Not a credential to your tenant. It stays in state because it has to be stable across applies; regenerating it every apply would invalidate notifications already in flight. |
+| `azurerm_function_app_flex_consumption` — `custom_domain_verification_id` | n/a | Used to prove domain ownership when binding a custom domain. Not a credential. |
+| Resource IDs, names, RBAC assignments, app settings | n/a | Infrastructure metadata. `app_settings` holds Key Vault *references* (`@Microsoft.KeyVault(SecretUri=…)`), never resolved secret values. |
 
-None of these is a credential to your tenant, but list them anyway if you are producing an inventory for an audit.
+None of these grants access to your Microsoft 365 tenant, to SharePoint, or to ROOTKey. They are scoped to the resources this module created. The SCM publishing password is the one worth treating as a real credential: whoever holds it can deploy code to the Function App. If your policy does not allow that in a state file, set `webdeploy_publish_basic_authentication_enabled = false` on the Function App, which makes it inert in the same way the storage keys already are.
+
+**Reproduce this list against your own deployment**, rather than trusting this page. Terraform marks every sensitive attribute itself, under `sensitive_values`:
+
+```bash
+terraform show -json > state.json
+```
+
+Open `state.json` and look at each resource's `sensitive_values` block: every attribute set to `true` there is one Terraform considers sensitive, and the matching entry under `values` is what was actually recorded. On a real deployment of this module that yields 19 entries, and the two that matter read like this:
+
+```
+azurerm_key_vault_secret.graph_client_secret   value   ""
+azurerm_key_vault_secret.rootkey_api_key       value   ""
+```
+
+Empty, because the module writes them with a write-only argument. Every other entry in the list is one of the items in the table above.
 
 **Where to keep the state file.** Even with no secrets in it, the state is an accurate map of your deployment and should not sit on an operator's laptop. Use a remote backend in your own cloud account — it also gives you state locking, so two people cannot apply at once:
 
@@ -179,7 +198,7 @@ terraform init
 terraform apply
 ```
 
-5. Because `runOnStartup: true` is set on the timer, the Function App reconciles subscriptions within seconds of finishing the deploy. You can confirm by inspecting the `connector-state` blob container:
+5. **Give the connector 20–30 minutes before your first test.** The timer carries `runOnStartup: true`, but on the Flex Consumption plan Azure runs each trigger type on its own instance group, and the group that owns the timer is not provisioned the moment the app is created. In a measured deployment the gap between `terraform apply` finishing and the first reconciliation was **19 minutes**. During that window the Function App is healthy and answering HTTP, and no subscription exists yet — a file uploaded then is picked up by the next delta sync, not lost. Once the first run happens the hourly timer fires on schedule. You can confirm by inspecting the `connector-state` blob container:
 
 ```bash
 az storage blob list \
