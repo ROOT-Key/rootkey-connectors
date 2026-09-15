@@ -219,7 +219,7 @@ module "rootkey_sharepoint_connector" {
   # the default branch at the moment you run terraform init, which means two
   # people deploying a week apart can get different code — not acceptable
   # under most change-control regimes.
-  source = "github.com/ROOT-Key/rootkey-connectors//sharepoint?ref=v1.0.0"
+  source = "github.com/ROOT-Key/rootkey-connectors//sharepoint?ref=v1.0.1"
 
   resource_group_name = "rootkey-connectors"
   azure_location      = "westeurope"
